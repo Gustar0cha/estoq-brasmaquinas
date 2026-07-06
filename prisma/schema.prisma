@@ -1,0 +1,92 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PapelUsuario {
+  ADMIN
+  OPERADOR
+}
+
+// Usuários do app (login/senha próprios, independentes do Sankhya).
+model Usuario {
+  id        String       @id @default(uuid())
+  nome      String
+  login     String       @unique
+  senhaHash String
+  role      PapelUsuario
+  criadoEm  DateTime     @default(now())
+
+  atribuicoes   MovimentacaoAtribuicao[]
+  conferencias  ConferenciaResultado[]
+
+  @@map("usuarios")
+}
+
+// Camada de "overlay" sobre a movimentação que existe no Sankhya: só guarda
+// quem é o responsável por conferi-la. O restante do dado (nota, itens,
+// quantidade esperada) vem ao vivo da API do Sankhya — não é duplicado aqui.
+model MovimentacaoAtribuicao {
+  id                    String   @id @default(uuid())
+  movimentacaoSankhyaId String   @unique
+  usuario               Usuario? @relation(fields: [usuarioId], references: [id])
+  usuarioId             String?
+  atualizadoEm          DateTime @updatedAt
+
+  @@map("movimentacao_atribuicoes")
+}
+
+// Resultado de uma conferência física finalizada. Guarda um snapshot de
+// nota/tipo/parceiro no momento da conferência para não depender de nova
+// consulta ao Sankhya ao listar divergências/indicadores.
+model ConferenciaResultado {
+  id                    String   @id @default(uuid())
+  movimentacaoSankhyaId String   @unique
+  numeroNota            String
+  tipo                  String
+  parceiro              String
+  conferidoPor          Usuario  @relation(fields: [conferidoPorId], references: [id])
+  conferidoPorId        String
+  dataConferencia       DateTime
+
+  itens        ItemConferido[]
+  divergencias Divergencia[]
+
+  @@map("conferencia_resultados")
+}
+
+model ItemConferido {
+  id                  String               @id @default(uuid())
+  conferencia         ConferenciaResultado @relation(fields: [conferenciaId], references: [id], onDelete: Cascade)
+  conferenciaId       String
+  itemSankhyaId       String
+  codigoProduto       String
+  quantidadeEsperada  Int
+  quantidadeConferida Int?
+
+  @@map("itens_conferidos")
+}
+
+model Divergencia {
+  id                  String               @id @default(uuid())
+  conferencia         ConferenciaResultado @relation(fields: [conferenciaId], references: [id], onDelete: Cascade)
+  conferenciaId       String
+  itemSankhyaId       String
+  codigoProduto       String
+  descricao           String
+  quantidadeEsperada  Int
+  quantidadeConferida Int
+  diferenca           Int
+  motivo              String
+  observacao          String?
+  comentarioAdmin     String?
+
+  @@map("divergencias")
+}
