@@ -37,6 +37,8 @@ export interface MovimentacaoDTO {
   tipo: TipoMovimentacaoSankhya;
   parceiro: string;
   dataMovimentacao: string;
+  empresaCodigo: string;
+  empresaNome: string;
   status: StatusConferencia;
   atribuidoPara: string | null;
   itens: ItemMovimentacaoDTO[];
@@ -109,6 +111,8 @@ async function montarMovimentacao(sankhya: MovimentacaoSankhya): Promise<Movimen
     tipo: sankhya.tipo,
     parceiro: sankhya.parceiro,
     dataMovimentacao: sankhya.dataMovimentacao,
+    empresaCodigo: sankhya.empresaCodigo,
+    empresaNome: sankhya.empresaNome,
     status,
     atribuidoPara: atribuicao?.usuarioId ?? null,
     itens,

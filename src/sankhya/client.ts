@@ -18,10 +18,15 @@ import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhy
 // `local` vem de TGFLOC.DESCRLOCAL (join por ITE.CODLOCALORIG), igual na
 // query original de vocês; se não houver local cadastrado, cai pro código.
 //
+// `empresaNome` vem de TSIEMP.NOMEFANTASIA (join por CAB.CODEMP) — testado e
+// confirmado no ambiente de vocês.
+//
 // Filtros de negócio (pedido pela equipe):
 //   - Não trazer itens sem local cadastrado, nem locais "SEM LOCAL",
 //     "AUTO" ou "AUTO ATENDIMENTO" (não fazem sentido pra conferência física).
 //   - Não trazer notas do tipo de operação 700 (CAB.CODTIPOPER).
+//   - Não filtra mais por empresa (CAB.CODEMP) — traz todas; o filtro por
+//     empresa agora é feito no app, no lado do admin.
 //
 // O serviço DbExplorerSP.executeQuery só aceita uma string de SQL (sem bind
 // parameters separados), então os valores abaixo são interpolados com
@@ -34,6 +39,8 @@ interface LinhaMovimentacaoSankhya {
   tipo: 'ENTRADA' | 'SAIDA' | null;
   parceiro: string | null;
   dataMovimentacao: string;
+  empresaCodigo: number;
+  empresaNome: string | null;
   codigoProduto: number;
   descricao: string;
   unidade: string | null;
@@ -60,6 +67,8 @@ function montarSelectBase(): string {
       END AS "tipo",
       PAR.NOMEPARC         AS "parceiro",
       TO_CHAR(CAB.DTNEG, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataMovimentacao",
+      CAB.CODEMP           AS "empresaCodigo",
+      EMP.NOMEFANTASIA     AS "empresaNome",
       ITE.CODPROD          AS "codigoProduto",
       PRO.DESCRPROD        AS "descricao",
       PRO.CODVOL           AS "unidade",
@@ -71,12 +80,14 @@ function montarSelectBase(): string {
     INNER JOIN TGFTOP TOP ON CAB.CODTIPOPER = TOP.CODTIPOPER AND CAB.DHTIPOPER = TOP.DHALTER
     LEFT JOIN TGFPAR PAR ON CAB.CODPARC = PAR.CODPARC
     LEFT JOIN TGFLOC LOC ON ITE.CODLOCALORIG = LOC.CODLOCAL
+    LEFT JOIN TSIEMP EMP ON CAB.CODEMP = EMP.CODEMP
   `;
 }
 
 const GROUP_BY = `
   GROUP BY
     CAB.NUNOTA, CAB.CODTIPOPER, TOP.ATUALEST, PAR.NOMEPARC, CAB.DTNEG,
+    CAB.CODEMP, EMP.NOMEFANTASIA,
     ITE.CODPROD, PRO.DESCRPROD, PRO.CODVOL, ITE.CODLOCALORIG, LOC.DESCRLOCAL
 `;
 
@@ -107,6 +118,8 @@ function agruparPorNota(linhas: LinhaMovimentacaoSankhya[]): MovimentacaoSankhya
         tipo: linha.tipo,
         parceiro: linha.parceiro ?? 'Não identificado',
         dataMovimentacao: linha.dataMovimentacao,
+        empresaCodigo: String(linha.empresaCodigo),
+        empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
         itens: [],
       };
       porNota.set(id, movimentacao);
@@ -137,8 +150,7 @@ export async function getMovimentacoesSankhya(
   const sql = `
     ${montarSelectBase()}
     WHERE
-      CAB.CODEMP = ${env.sankhya.codEmpresa}
-      AND CAB.STATUSNOTA = 'L'
+      CAB.STATUSNOTA = 'L'
       AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
       AND TRUNC(CAB.DTNEG) BETWEEN ${formatarDataOracle(dataInicio)} AND ${formatarDataOracle(dataFim)}
       ${FILTROS_COMUNS}
@@ -165,7 +177,6 @@ export async function getMovimentacaoSankhyaPorId(id: string): Promise<Movimenta
     ${montarSelectBase()}
     WHERE
       CAB.NUNOTA = ${nunota}
-      AND CAB.CODEMP = ${env.sankhya.codEmpresa}
       AND CAB.STATUSNOTA = 'L'
       ${FILTROS_COMUNS}
     ${GROUP_BY}

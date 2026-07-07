@@ -16,6 +16,8 @@ export interface MovimentacaoSankhya {
   tipo: TipoMovimentacaoSankhya;
   parceiro: string;
   dataMovimentacao: string;
+  empresaCodigo: string;
+  empresaNome: string;
   itens: ItemMovimentacaoSankhya[];
 }
 

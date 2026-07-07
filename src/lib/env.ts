@@ -24,7 +24,6 @@ export const env = {
     clientSecret: obrigatoria('SANKHYA_CLIENT_SECRET'),
     // Token gerado na tela "Configurações do Gateway" do Sankhya Om.
     xToken: obrigatoria('SANKHYA_X_TOKEN'),
-    codEmpresa: Number(process.env.SANKHYA_CODEMP ?? 1),
     // Janela de quantos dias pra trás buscar notas — evita puxar o histórico
     // inteiro do Sankhya a cada listagem.
     diasHistorico: Number(process.env.SANKHYA_DIAS_HISTORICO ?? 30),
