@@ -18,6 +18,11 @@ import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhy
 // `local` vem de TGFLOC.DESCRLOCAL (join por ITE.CODLOCALORIG), igual na
 // query original de vocês; se não houver local cadastrado, cai pro código.
 //
+// Filtros de negócio (pedido pela equipe):
+//   - Não trazer itens sem local cadastrado, nem locais "SEM LOCAL",
+//     "AUTO" ou "AUTO ATENDIMENTO" (não fazem sentido pra conferência física).
+//   - Não trazer notas do tipo de operação 700 (CAB.CODTIPOPER).
+//
 // O serviço DbExplorerSP.executeQuery só aceita uma string de SQL (sem bind
 // parameters separados), então os valores abaixo são interpolados com
 // cuidado — todos vêm de números já validados (Number.isFinite) ou de datas
@@ -75,6 +80,15 @@ const GROUP_BY = `
     ITE.CODPROD, PRO.DESCRPROD, PRO.CODVOL, ITE.CODLOCALORIG, LOC.DESCRLOCAL
 `;
 
+// Aplicados em toda consulta ao Sankhya (lista e por ID) — ver motivos no
+// comentário no topo do arquivo.
+const FILTROS_COMUNS = `
+  AND LOC.DESCRLOCAL IS NOT NULL
+  AND UPPER(LOC.DESCRLOCAL) NOT LIKE '%SEM LOCAL%'
+  AND UPPER(LOC.DESCRLOCAL) NOT LIKE '%AUTO%'
+  AND CAB.CODTIPOPER NOT IN (700)
+`;
+
 function agruparPorNota(linhas: LinhaMovimentacaoSankhya[]): MovimentacaoSankhya[] {
   const porNota = new Map<string, MovimentacaoSankhya>();
 
@@ -127,6 +141,7 @@ export async function getMovimentacoesSankhya(
       AND CAB.STATUSNOTA = 'L'
       AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
       AND TRUNC(CAB.DTNEG) BETWEEN ${formatarDataOracle(dataInicio)} AND ${formatarDataOracle(dataFim)}
+      ${FILTROS_COMUNS}
     ${GROUP_BY}
     ORDER BY CAB.DTNEG DESC, CAB.NUNOTA DESC
   `;
@@ -152,6 +167,7 @@ export async function getMovimentacaoSankhyaPorId(id: string): Promise<Movimenta
       CAB.NUNOTA = ${nunota}
       AND CAB.CODEMP = ${env.sankhya.codEmpresa}
       AND CAB.STATUSNOTA = 'L'
+      ${FILTROS_COMUNS}
     ${GROUP_BY}
     ORDER BY ITE.CODPROD
   `;
