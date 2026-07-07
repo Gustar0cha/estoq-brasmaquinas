@@ -41,3 +41,27 @@ usuariosRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
     res.status(409).json({ erro: error instanceof Error ? error.message : 'Não foi possível criar o usuário.' });
   }
 });
+
+const atualizarUsuarioSchema = z.object({
+  login: z.string().min(1).optional(),
+  senha: z.string().min(4).optional(),
+  role: z.enum(['ADMIN', 'OPERADOR']).optional(),
+});
+
+usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
+  const { id } = req.params as { id: string };
+  const parse = atualizarUsuarioSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const usuario = await usuariosService.atualizarUsuario(id, parse.data);
+    res.json(usuario);
+  } catch (error) {
+    res
+      .status(409)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível atualizar o usuário.' });
+  }
+});
