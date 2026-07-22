@@ -21,6 +21,14 @@ import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhy
 // `empresaNome` vem de TSIEMP.NOMEFANTASIA (join por CAB.CODEMP) — testado e
 // confirmado no ambiente de vocês.
 //
+// `quantidadeEsperada` vem de TGFEST.ESTOQUE (tabela de estoque atual por
+// produto+local+empresa) — NÃO é a quantidade movimentada nesta nota
+// (SUM(ITE.QTDNEG)). Isso é proposital: a conferência física compara a
+// contagem cega do operador contra o que deveria estar fisicamente no local
+// agora, não contra a quantidade que entrou/saiu neste documento específico
+// (confirmado testando contra o ambiente real: mesmo produto em locais
+// diferentes tem estoques bem diferentes entre si e da quantidade da nota).
+//
 // Filtros de negócio (pedido pela equipe):
 //   - Não trazer itens sem local cadastrado, nem locais "SEM LOCAL",
 //     "AUTO" ou "AUTO ATENDIMENTO" (não fazem sentido pra conferência física).
@@ -44,6 +52,7 @@ interface LinhaMovimentacaoSankhya {
   codigoProduto: number;
   descricao: string;
   unidade: string | null;
+  localCodigo: number;
   local: string | null;
   quantidadeEsperada: number;
 }
@@ -72,8 +81,15 @@ function montarSelectBase(): string {
       ITE.CODPROD          AS "codigoProduto",
       PRO.DESCRPROD        AS "descricao",
       PRO.CODVOL           AS "unidade",
+      ITE.CODLOCALORIG     AS "localCodigo",
       COALESCE(LOC.DESCRLOCAL, TO_CHAR(ITE.CODLOCALORIG)) AS "local",
-      SUM(ITE.QTDNEG)      AS "quantidadeEsperada"
+      MAX((
+        SELECT NVL(SUM(EST.ESTOQUE), 0)
+        FROM TGFEST EST
+        WHERE EST.CODPROD = ITE.CODPROD
+          AND EST.CODLOCAL = ITE.CODLOCALORIG
+          AND EST.CODEMP = CAB.CODEMP
+      )) AS "quantidadeEsperada"
     FROM TGFCAB CAB
     INNER JOIN TGFITE ITE ON CAB.NUNOTA = ITE.NUNOTA
     INNER JOIN TGFPRO PRO ON ITE.CODPROD = PRO.CODPROD
@@ -126,7 +142,10 @@ function agruparPorNota(linhas: LinhaMovimentacaoSankhya[]): MovimentacaoSankhya
     }
 
     const item: ItemMovimentacaoSankhya = {
-      id: `${id}-${linha.codigoProduto}`,
+      // Inclui o local no id: o mesmo produto pode aparecer em mais de um
+      // local dentro da mesma nota (linhas diferentes), e cada linha precisa
+      // de um id único — senão a contagem de uma linha "vaza" pra outra.
+      id: `${id}-${linha.codigoProduto}-${linha.localCodigo}`,
       codigoProduto: String(linha.codigoProduto),
       codigoBarras: '',
       descricao: linha.descricao,
