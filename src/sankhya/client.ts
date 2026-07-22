@@ -1,5 +1,6 @@
 import { executarQuery } from './gateway';
 import { env } from '../lib/env';
+import { DiaReferencia, formatarDiaReferencia } from '../lib/datas';
 import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhya } from './types';
 
 // Integração com o Sankhya via API Gateway (OAuth2 + DbExplorerSP.executeQuery)
@@ -62,6 +63,13 @@ function formatarDataOracle(data: Date): string {
   const mes = String(data.getMonth() + 1).padStart(2, '0');
   const dia = String(data.getDate()).padStart(2, '0');
   return `TO_DATE('${ano}-${mes}-${dia}', 'YYYY-MM-DD')`;
+}
+
+// Versão que parte de um DiaReferencia (ano/mês/dia explícitos) em vez de um
+// Date — usada pelas consultas de conferência diária pra nunca depender do
+// fuso horário do processo Node (ver src/lib/datas.ts).
+function formatarDiaReferenciaOracle(diaRef: DiaReferencia): string {
+  return `TO_DATE('${formatarDiaReferencia(diaRef)}', 'YYYY-MM-DD')`;
 }
 
 function montarSelectBase(): string {
@@ -238,7 +246,8 @@ interface LinhaMovimentoDiarioSankhya {
 // conferência diária de estoque (cópia do dia anterior + entradas − saídas,
 // comparado contra a contagem física feita no app). Mesmos filtros de
 // negócio da consulta de movimentações (local válido, sem CODTIPOPER 700).
-export async function getMovimentoDiarioSankhya(data: Date): Promise<MovimentoDiarioSankhya[]> {
+export async function getMovimentoDiarioSankhya(diaRef: DiaReferencia): Promise<MovimentoDiarioSankhya[]> {
+  const dataOracle = formatarDiaReferenciaOracle(diaRef);
   const sql = `
     SELECT
       ITE.CODPROD          AS "codigoProduto",
@@ -255,7 +264,7 @@ export async function getMovimentoDiarioSankhya(data: Date): Promise<MovimentoDi
          AND CTE.DTCONTAGEM = (
            SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
            WHERE CTE2.CODPROD = ITE.CODPROD AND CTE2.CODLOCAL = ITE.CODLOCALORIG AND CTE2.CODEMP = CAB.CODEMP
-             AND CTE2.DTCONTAGEM < ${formatarDataOracle(data)}
+             AND CTE2.DTCONTAGEM < ${dataOracle}
          )
       ) AS "estoqueAnterior"
     FROM TGFCAB CAB
@@ -266,7 +275,7 @@ export async function getMovimentoDiarioSankhya(data: Date): Promise<MovimentoDi
     LEFT JOIN TSIEMP EMP ON CAB.CODEMP = EMP.CODEMP
     WHERE CAB.STATUSNOTA = 'L'
       AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
-      AND TRUNC(CAB.DTNEG) = TRUNC(${formatarDataOracle(data)})
+      AND TRUNC(CAB.DTNEG) = TRUNC(${dataOracle})
       ${FILTROS_COMUNS}
     GROUP BY ITE.CODPROD, PRO.DESCRPROD, ITE.CODLOCALORIG, LOC.DESCRLOCAL, CAB.CODEMP, EMP.NOMEFANTASIA
   `;
@@ -284,4 +293,108 @@ export async function getMovimentoDiarioSankhya(data: Date): Promise<MovimentoDi
     saidas: linha.saidas,
     estoqueAnterior: linha.estoqueAnterior,
   }));
+}
+
+export interface EstoqueAnteriorDetalhe {
+  data: string | null; // dia (YYYY-MM-DD) do snapshot TGFCTE usado — null se nunca houve cópia
+  quantidade: number;
+}
+
+export interface MovimentoDetalheSankhya {
+  numeroNota: string;
+  tipo: 'ENTRADA' | 'SAIDA';
+  parceiro: string;
+  quantidade: number;
+  dataMovimentacao: string;
+}
+
+export interface DetalheConferenciaDiariaSankhya {
+  estoqueAnterior: EstoqueAnteriorDetalhe;
+  movimentos: MovimentoDetalheSankhya[];
+}
+
+interface LinhaCopiaAnteriorSankhya {
+  data: string | null;
+  quantidade: number;
+}
+
+interface LinhaMovimentoDetalheSankhya {
+  numeroNota: number;
+  tipo: 'ENTRADA' | 'SAIDA' | null;
+  parceiro: string | null;
+  quantidade: number;
+  dataMovimentacao: string;
+}
+
+// Drill-down de uma linha da conferência diária: qual cópia (TGFCTE) foi
+// usada como "estoque anterior" e quais notas, uma a uma, formam os totais
+// de entrada/saída daquele dia — pra dar pra auditar/validar a conta com
+// alguém de fora do time técnico (ex: a gerência).
+export async function getDetalheConferenciaDiariaSankhya(
+  diaRef: DiaReferencia,
+  codigoProduto: string,
+  localCodigo: string,
+  empresaCodigo: string
+): Promise<DetalheConferenciaDiariaSankhya> {
+  const dataOracle = formatarDiaReferenciaOracle(diaRef);
+  const produto = Number(codigoProduto);
+  const local = Number(localCodigo);
+  const empresa = Number(empresaCodigo);
+
+  const sqlCopia = `
+    SELECT TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD') AS "data", CTE.QTDEST AS "quantidade"
+    FROM TGFCTE CTE
+    WHERE CTE.CODPROD = ${produto} AND CTE.CODLOCAL = ${local} AND CTE.CODEMP = ${empresa}
+      AND CTE.DTCONTAGEM = (
+        SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+        WHERE CTE2.CODPROD = ${produto} AND CTE2.CODLOCAL = ${local} AND CTE2.CODEMP = ${empresa}
+          AND CTE2.DTCONTAGEM < ${dataOracle}
+      )
+  `;
+
+  const sqlMovimentos = `
+    SELECT
+      CAB.NUNOTA AS "numeroNota",
+      CASE
+        WHEN CAB.CODTIPOPER = 800 THEN 'SAIDA'
+        WHEN TOP.ATUALEST = 'E' THEN 'ENTRADA'
+        WHEN TOP.ATUALEST = 'B' THEN 'SAIDA'
+      END AS "tipo",
+      PAR.NOMEPARC AS "parceiro",
+      ITE.QTDNEG AS "quantidade",
+      TO_CHAR(CAB.DTNEG, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataMovimentacao"
+    FROM TGFCAB CAB
+    INNER JOIN TGFITE ITE ON CAB.NUNOTA = ITE.NUNOTA
+    INNER JOIN TGFTOP TOP ON CAB.CODTIPOPER = TOP.CODTIPOPER AND CAB.DHTIPOPER = TOP.DHALTER
+    LEFT JOIN TGFPAR PAR ON CAB.CODPARC = PAR.CODPARC
+    WHERE CAB.STATUSNOTA = 'L'
+      AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
+      AND TRUNC(CAB.DTNEG) = TRUNC(${dataOracle})
+      AND ITE.CODPROD = ${produto}
+      AND ITE.CODLOCALORIG = ${local}
+      AND CAB.CODEMP = ${empresa}
+      AND CAB.CODTIPOPER NOT IN (700)
+    ORDER BY CAB.DTNEG
+  `;
+
+  const [linhasCopia, linhasMovimentos] = await Promise.all([
+    executarQuery<LinhaCopiaAnteriorSankhya>(sqlCopia),
+    executarQuery<LinhaMovimentoDetalheSankhya>(sqlMovimentos),
+  ]);
+
+  return {
+    estoqueAnterior: {
+      data: linhasCopia[0]?.data ?? null,
+      quantidade: linhasCopia[0]?.quantidade ?? 0,
+    },
+    movimentos: linhasMovimentos
+      .filter((l): l is LinhaMovimentoDetalheSankhya & { tipo: 'ENTRADA' | 'SAIDA' } => l.tipo !== null)
+      .map((l) => ({
+        numeroNota: String(l.numeroNota),
+        tipo: l.tipo,
+        parceiro: l.parceiro ?? 'Não identificado',
+        quantidade: l.quantidade,
+        dataMovimentacao: l.dataMovimentacao,
+      })),
+  };
 }
