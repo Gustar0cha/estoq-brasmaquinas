@@ -206,3 +206,82 @@ export async function getMovimentacaoSankhyaPorId(id: string): Promise<Movimenta
   const [movimentacao] = agruparPorNota(linhas);
   return movimentacao ?? null;
 }
+
+export interface MovimentoDiarioSankhya {
+  codigoProduto: string;
+  descricao: string;
+  localCodigo: string;
+  local: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  entradas: number;
+  saidas: number;
+  // Estoque no snapshot diário do Sankhya (TGFCTE) mais recente ANTERIOR à
+  // data pedida — a cópia não roda todo dia, então "anterior" é o último
+  // disponível, não necessariamente D-1 exato.
+  estoqueAnterior: number;
+}
+
+interface LinhaMovimentoDiarioSankhya {
+  codigoProduto: number;
+  descricao: string;
+  localCodigo: number;
+  local: string | null;
+  empresaCodigo: number;
+  empresaNome: string | null;
+  entradas: number;
+  saidas: number;
+  estoqueAnterior: number;
+}
+
+// Movimento agregado por produto+local+empresa num único dia — base da
+// conferência diária de estoque (cópia do dia anterior + entradas − saídas,
+// comparado contra a contagem física feita no app). Mesmos filtros de
+// negócio da consulta de movimentações (local válido, sem CODTIPOPER 700).
+export async function getMovimentoDiarioSankhya(data: Date): Promise<MovimentoDiarioSankhya[]> {
+  const sql = `
+    SELECT
+      ITE.CODPROD          AS "codigoProduto",
+      PRO.DESCRPROD         AS "descricao",
+      ITE.CODLOCALORIG      AS "localCodigo",
+      COALESCE(LOC.DESCRLOCAL, TO_CHAR(ITE.CODLOCALORIG)) AS "local",
+      CAB.CODEMP            AS "empresaCodigo",
+      EMP.NOMEFANTASIA      AS "empresaNome",
+      SUM(CASE WHEN CAB.CODTIPOPER != 800 AND TOP.ATUALEST = 'E' THEN ITE.QTDNEG ELSE 0 END) AS "entradas",
+      SUM(CASE WHEN CAB.CODTIPOPER = 800 OR TOP.ATUALEST = 'B' THEN ITE.QTDNEG ELSE 0 END) AS "saidas",
+      (SELECT NVL(MAX(CTE.QTDEST), 0)
+       FROM TGFCTE CTE
+       WHERE CTE.CODPROD = ITE.CODPROD AND CTE.CODLOCAL = ITE.CODLOCALORIG AND CTE.CODEMP = CAB.CODEMP
+         AND CTE.DTCONTAGEM = (
+           SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+           WHERE CTE2.CODPROD = ITE.CODPROD AND CTE2.CODLOCAL = ITE.CODLOCALORIG AND CTE2.CODEMP = CAB.CODEMP
+             AND CTE2.DTCONTAGEM < ${formatarDataOracle(data)}
+         )
+      ) AS "estoqueAnterior"
+    FROM TGFCAB CAB
+    INNER JOIN TGFITE ITE ON CAB.NUNOTA = ITE.NUNOTA
+    INNER JOIN TGFPRO PRO ON ITE.CODPROD = PRO.CODPROD
+    INNER JOIN TGFTOP TOP ON CAB.CODTIPOPER = TOP.CODTIPOPER AND CAB.DHTIPOPER = TOP.DHALTER
+    LEFT JOIN TGFLOC LOC ON ITE.CODLOCALORIG = LOC.CODLOCAL
+    LEFT JOIN TSIEMP EMP ON CAB.CODEMP = EMP.CODEMP
+    WHERE CAB.STATUSNOTA = 'L'
+      AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
+      AND TRUNC(CAB.DTNEG) = TRUNC(${formatarDataOracle(data)})
+      ${FILTROS_COMUNS}
+    GROUP BY ITE.CODPROD, PRO.DESCRPROD, ITE.CODLOCALORIG, LOC.DESCRLOCAL, CAB.CODEMP, EMP.NOMEFANTASIA
+  `;
+
+  const linhas = await executarQuery<LinhaMovimentoDiarioSankhya>(sql);
+
+  return linhas.map((linha) => ({
+    codigoProduto: String(linha.codigoProduto),
+    descricao: linha.descricao,
+    localCodigo: String(linha.localCodigo),
+    local: linha.local ?? '',
+    empresaCodigo: String(linha.empresaCodigo),
+    empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
+    entradas: linha.entradas,
+    saidas: linha.saidas,
+    estoqueAnterior: linha.estoqueAnterior,
+  }));
+}

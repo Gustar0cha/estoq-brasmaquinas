@@ -52,6 +52,7 @@ model ConferenciaResultado {
   numeroNota            String
   tipo                  String
   parceiro              String
+  empresaCodigo         String
   conferidoPor          Usuario  @relation(fields: [conferidoPorId], references: [id])
   conferidoPorId        String
   dataConferencia       DateTime
@@ -68,7 +69,15 @@ model ItemConferido {
   conferenciaId       String
   itemSankhyaId       String
   codigoProduto       String
-  quantidadeEsperada  Int
+  // Código do local de armazenagem (extraído do itemSankhyaId, que já vem
+  // como "{nunota}-{codigoProduto}-{localCodigo}") — precisa ficar salvo
+  // aqui pra conferência diária casar contagens com produto+local+empresa+dia
+  // sem depender de uma nova consulta ao Sankhya.
+  localCodigo         String
+  // Float, não Int: TGFEST.ESTOQUE pode ser fracionário (produtos vendidos
+  // por metro/kg, ex: "118.17"). Int aqui derrubava o salvamento da
+  // conferência pra qualquer produto medido em unidade fracionária.
+  quantidadeEsperada  Float
   quantidadeConferida Int?
 
   @@map("itens_conferidos")
@@ -81,9 +90,9 @@ model Divergencia {
   itemSankhyaId       String
   codigoProduto       String
   descricao           String
-  quantidadeEsperada  Int
+  quantidadeEsperada  Float
   quantidadeConferida Int
-  diferenca           Int
+  diferenca           Float
   motivo              String
   observacao          String?
   comentarioAdmin     String?

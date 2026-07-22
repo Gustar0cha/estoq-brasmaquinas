@@ -2,6 +2,7 @@ import cors from 'cors';
 import express from 'express';
 
 import { authRouter } from './routes/auth.routes';
+import { conferenciaDiariaRouter } from './routes/conferenciaDiaria.routes';
 import { divergenciasRouter } from './routes/divergencias.routes';
 import { movimentacoesRouter } from './routes/movimentacoes.routes';
 import { relatoriosRouter } from './routes/relatorios.routes';
@@ -19,3 +20,4 @@ app.use('/usuarios', usuariosRouter);
 app.use('/movimentacoes', movimentacoesRouter);
 app.use('/divergencias', divergenciasRouter);
 app.use('/relatorios', relatoriosRouter);
+app.use('/conferencia-diaria', conferenciaDiariaRouter);

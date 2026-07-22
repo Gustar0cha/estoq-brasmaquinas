@@ -149,6 +149,12 @@ export async function getMovimentacao(id: string): Promise<MovimentacaoDTO> {
   return montarMovimentacao(sankhya);
 }
 
+// itemId vem como "{nunota}-{codigoProduto}-{localCodigo}" (ver
+// sankhya/client.ts) — extrai o local sem precisar de outra consulta.
+function extrairLocalCodigo(itemId: string): string {
+  return itemId.split('-').pop()!;
+}
+
 export async function enviarConferencia(input: EnviarConferenciaInput): Promise<MovimentacaoDTO> {
   const sankhya = await getMovimentacaoSankhyaPorId(input.movimentacaoId);
   if (!sankhya) {
@@ -158,6 +164,7 @@ export async function enviarConferencia(input: EnviarConferenciaInput): Promise<
   const dadosItens = input.itens.map((item) => ({
     itemSankhyaId: item.itemId,
     codigoProduto: item.codigoProduto,
+    localCodigo: extrairLocalCodigo(item.itemId),
     quantidadeEsperada: item.quantidadeEsperada,
     quantidadeConferida: item.quantidadeConferida,
   }));
@@ -180,6 +187,7 @@ export async function enviarConferencia(input: EnviarConferenciaInput): Promise<
       numeroNota: sankhya.numeroNota,
       tipo: sankhya.tipo,
       parceiro: sankhya.parceiro,
+      empresaCodigo: sankhya.empresaCodigo,
       conferidoPorId: input.conferidoPorId,
       dataConferencia: new Date(),
       itens: { create: dadosItens },
