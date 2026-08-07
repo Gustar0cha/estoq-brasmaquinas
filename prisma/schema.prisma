@@ -26,6 +26,8 @@ model Usuario {
 
   atribuicoes   MovimentacaoAtribuicao[]
   conferencias  ConferenciaResultado[]
+  itemAtribuicoes  ItemAtribuicao[]
+  itemConferencias ItemConferenciaResultado[]
 
   @@map("usuarios")
 }
@@ -81,6 +83,51 @@ model ItemConferido {
   quantidadeConferida Int?
 
   @@map("itens_conferidos")
+}
+
+// Camada de "overlay" de atribuição por grupo produto+local, substituindo a
+// atribuição por nota (MovimentacaoAtribuicao, acima): a unidade de trabalho
+// da conferência física é "esse produto, nesse local" — o mesmo produto+local
+// costuma aparecer espalhado em várias notas dentro do período, e não fazia
+// sentido o admin ter que atribuir nota a nota pro operador ir contar a
+// mesma prateleira várias vezes. `chave` é "{empresaCodigo}|{codigoProduto}|{localCodigo}",
+// mesmo formato já usado em conferenciaDiaria.service.ts.
+model ItemAtribuicao {
+  id            String   @id @default(uuid())
+  chave         String   @unique
+  empresaCodigo String
+  codigoProduto String
+  localCodigo   String
+  usuario       Usuario? @relation(fields: [usuarioId], references: [id])
+  usuarioId     String?
+  atualizadoEm  DateTime @updatedAt
+
+  @@map("item_atribuicoes")
+}
+
+// Resultado da conferência física de um grupo produto+local: uma única
+// contagem cega que vale pra todas as notas daquele produto+local no
+// período (quantidadeEsperada já é o estoque físico do local — igual pra
+// qualquer nota que passe por ali, não faz sentido contar nota a nota).
+model ItemConferenciaResultado {
+  id                  String   @id @default(uuid())
+  chave               String   @unique
+  empresaCodigo       String
+  codigoProduto       String
+  descricao           String
+  local               String
+  localCodigo         String
+  quantidadeEsperada  Float
+  quantidadeConferida Int
+  diferenca           Float
+  conferidoPor        Usuario  @relation(fields: [conferidoPorId], references: [id])
+  conferidoPorId      String
+  dataConferencia     DateTime
+  motivo              String?
+  observacao          String?
+  comentarioAdmin     String?
+
+  @@map("item_conferencia_resultados")
 }
 
 model Divergencia {

@@ -31,8 +31,13 @@ import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhy
 // diferentes tem estoques bem diferentes entre si e da quantidade da nota).
 //
 // Filtros de negócio (pedido pela equipe):
-//   - Não trazer itens sem local cadastrado, nem locais "SEM LOCAL",
-//     "AUTO" ou "AUTO ATENDIMENTO" (não fazem sentido pra conferência física).
+//   - Local tem que começar com "RUA" (é o padrão dos locais de armazenagem
+//     físicos de verdade — endereços de rua/prédio/nível). O filtro antigo
+//     (excluir "SEM LOCAL"/"AUTO" por texto) deixava passar local que não
+//     deveria contar; a equipe trocou por uma allowlist de prefixo + uma
+//     lista explícita de códigos de local pra excluir (locais que começam
+//     com "RUA" mas são áreas de staging/auto-atendimento, não conferência
+//     física de verdade) — ver LOCAIS_EXCLUIDOS_DA_CONFERENCIA abaixo.
 //   - Não trazer notas do tipo de operação 700 (CAB.CODTIPOPER).
 //   - Não filtra mais por empresa (CAB.CODEMP) — traz todas; o filtro por
 //     empresa agora é feito no app, no lado do admin.
@@ -115,12 +120,21 @@ const GROUP_BY = `
     ITE.CODPROD, PRO.DESCRPROD, PRO.CODVOL, ITE.CODLOCALORIG, LOC.DESCRLOCAL
 `;
 
+// Códigos de local (ITE.CODLOCALORIG) que começam com "RUA" mas não devem
+// contar pra conferência física (áreas de staging/auto-atendimento etc.) —
+// lista passada pela equipe de estoque, atualizada em 2026-08-06.
+const LOCAIS_EXCLUIDOS_DA_CONFERENCIA = [
+  298012, 298005, 298006, 298004, 298001, 298002, 298003, 298013,
+  297001, 298043, 199000, 298018, 298017, 298011, 298044, 298040,
+  5006010, 298046, 298055, 298047, 298048, 298049, 298050, 298051,
+  298052, 298053, 298054, 298056, 298045, 105997, 298042, 298007,
+];
+
 // Aplicados em toda consulta ao Sankhya (lista e por ID) — ver motivos no
 // comentário no topo do arquivo.
 const FILTROS_COMUNS = `
-  AND LOC.DESCRLOCAL IS NOT NULL
-  AND UPPER(LOC.DESCRLOCAL) NOT LIKE '%SEM LOCAL%'
-  AND UPPER(LOC.DESCRLOCAL) NOT LIKE '%AUTO%'
+  AND ITE.CODLOCALORIG NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
+  AND UPPER(LOC.DESCRLOCAL) LIKE 'RUA%'
   AND CAB.CODTIPOPER NOT IN (700)
 `;
 
