@@ -6,7 +6,7 @@ import type {
   ItemConferido as ItemConferidoPrisma,
 } from '../generated/prisma/client';
 
-export type StatusConferencia = 'PENDENTE' | 'CONFERIDA' | 'DIVERGENCIA';
+export type StatusConferencia = 'PENDENTE' | 'CONFERIDA' | 'DIVERGENCIA' | 'AGUARDANDO_SEGUNDA_CONTAGEM';
 
 export interface ItemMovimentacaoDTO {
   id: string;

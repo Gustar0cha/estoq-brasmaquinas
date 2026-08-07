@@ -28,4 +28,11 @@ export const env = {
     // inteiro do Sankhya a cada listagem.
     diasHistorico: Number(process.env.SANKHYA_DIAS_HISTORICO ?? 30),
   },
+  minio: {
+    endpoint: obrigatoria('MINIO_ENDPOINT'),
+    accessKey: obrigatoria('MINIO_ACCESS_KEY'),
+    secretKey: obrigatoria('MINIO_SECRET_KEY'),
+    bucket: obrigatoria('MINIO_BUCKET'),
+    region: process.env.MINIO_REGION ?? 'us-east-1',
+  },
 };

@@ -7,6 +7,7 @@ import { divergenciasRouter } from './routes/divergencias.routes';
 import { historicoRouter } from './routes/historico.routes';
 import { itemConferenciaRouter } from './routes/itemConferencia.routes';
 import { movimentacoesRouter } from './routes/movimentacoes.routes';
+import { notificacoesRouter } from './routes/notificacoes.routes';
 import { relatoriosRouter } from './routes/relatorios.routes';
 import { usuariosRouter } from './routes/usuarios.routes';
 
@@ -21,6 +22,7 @@ app.use('/auth', authRouter);
 app.use('/usuarios', usuariosRouter);
 app.use('/movimentacoes', movimentacoesRouter);
 app.use('/item-conferencia', itemConferenciaRouter);
+app.use('/notificacoes', notificacoesRouter);
 app.use('/divergencias', divergenciasRouter);
 app.use('/relatorios', relatoriosRouter);
 app.use('/conferencia-diaria', conferenciaDiariaRouter);

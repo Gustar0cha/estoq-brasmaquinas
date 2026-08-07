@@ -28,6 +28,8 @@ model Usuario {
   conferencias  ConferenciaResultado[]
   itemAtribuicoes  ItemAtribuicao[]
   itemConferencias ItemConferenciaResultado[]
+  segundasContagensSolicitadas ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesFeitas")
+  segundasContagensAtribuidas  ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesAtribuidas")
 
   @@map("usuarios")
 }
@@ -105,13 +107,17 @@ model ItemAtribuicao {
   @@map("item_atribuicoes")
 }
 
-// Resultado da conferência física de um grupo produto+local: uma única
-// contagem cega que vale pra todas as notas daquele produto+local no
-// período (quantidadeEsperada já é o estoque físico do local — igual pra
-// qualquer nota que passe por ali, não faz sentido contar nota a nota).
+// Resultado da conferência física de um grupo produto+local: uma contagem
+// cega que vale pra todas as notas daquele produto+local no período
+// (quantidadeEsperada já é o estoque físico do local — igual pra qualquer
+// nota que passe por ali, não faz sentido contar nota a nota).
+// numeroContagem 1 é a contagem original; 2 é a recontagem pedida pelo
+// gestor quando a 1ª diverge (ver ItemSolicitacaoSegundaContagem) — cada
+// chave pode ter até duas linhas aqui, uma por número de contagem.
 model ItemConferenciaResultado {
   id                  String   @id @default(uuid())
-  chave               String   @unique
+  chave               String
+  numeroContagem      Int      @default(1)
   empresaCodigo       String
   codigoProduto       String
   descricao           String
@@ -126,8 +132,49 @@ model ItemConferenciaResultado {
   motivo              String?
   observacao          String?
   comentarioAdmin     String?
+  // Valores lidos pelo leitor de código de barras/QR no momento da
+  // contagem — guardados só como evidência de que o operador bipou algo
+  // fisicamente ali (o Sankhya não tem código de barras cadastrado nos
+  // produtos nesse ambiente, então não há o que validar contra).
+  codigoLocalBipado    String?
+  codigoProdutoBipado  String?
+  // Chave do objeto no MinIO (nunca uma URL pública) — a foto só é servida
+  // via proxy autenticado da nossa API, o app não recebe acesso direto ao
+  // bucket nem essa foto aparece em nenhuma tela do operador.
+  fotoChaveArmazenamento String?
 
+  @@unique([chave, numeroContagem])
   @@map("item_conferencia_resultados")
+}
+
+// Fica registrada quando o gestor pede recontagem de um item com
+// divergência na 1ª contagem. Enquanto existir sem a 2ª contagem
+// correspondente em ItemConferenciaResultado, o item aparece pro
+// `usuarioId` atribuído como "aguardando 2ª contagem".
+model ItemSolicitacaoSegundaContagem {
+  id              String   @id @default(uuid())
+  chave           String   @unique
+  solicitadoPor   Usuario  @relation("SolicitacoesFeitas", fields: [solicitadoPorId], references: [id])
+  solicitadoPorId String
+  usuario         Usuario? @relation("SolicitacoesAtribuidas", fields: [usuarioId], references: [id])
+  usuarioId       String?
+  criadoEm        DateTime @default(now())
+
+  @@map("item_solicitacoes_segunda_contagem")
+}
+
+// Central de avisos pro gestor — hoje só divergência de 1ª contagem, mas o
+// `tipo` já deixa aberto pra outros avisos no futuro sem mudar o schema.
+model Notificacao {
+  id        String   @id @default(uuid())
+  tipo      String
+  chave     String
+  titulo    String
+  mensagem  String
+  lida      Boolean  @default(false)
+  criadoEm  DateTime @default(now())
+
+  @@map("notificacoes")
 }
 
 model Divergencia {
