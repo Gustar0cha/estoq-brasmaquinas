@@ -140,6 +140,30 @@ itemConferenciaRouter.get(
   }
 );
 
+// Apaga uma contagem já registrada — só admin. Apagar a 1ª contagem também
+// apaga a 2ª e qualquer pedido de recontagem que dependesse dela (cascata
+// feita no service), voltando o item pro estado PENDENTE.
+itemConferenciaRouter.delete(
+  '/:chave/contagem/:numeroContagem',
+  autenticar,
+  exigirAdmin,
+  async (req, res) => {
+    const { chave, numeroContagem } = req.params as { chave: string; numeroContagem: string };
+    const numero = Number(numeroContagem);
+    if (numero !== 1 && numero !== 2) {
+      res.status(400).json({ erro: 'Número de contagem inválido.' });
+      return;
+    }
+
+    const item = await itemConferenciaService.apagarContagemItem(chave, numero);
+    if (!item) {
+      res.status(404).json({ erro: 'Item não encontrado.' });
+      return;
+    }
+    res.json(item);
+  }
+);
+
 const atribuicaoSchema = z.object({
   usuarioId: z.string().nullable(),
 });

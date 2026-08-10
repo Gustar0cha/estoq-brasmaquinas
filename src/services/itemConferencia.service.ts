@@ -1,4 +1,4 @@
-import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
+import { uploadFotoContagem, obterFotoStream, removerFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import { getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
@@ -367,6 +367,38 @@ export async function solicitarSegundaContagem(
     create: { chave, solicitadoPorId, usuarioId },
     update: { usuarioId },
   });
+
+  return getItemAgrupado(chave);
+}
+
+// Apagar a 1ª contagem invalida qualquer 2ª contagem/pedido de recontagem que
+// dependesse dela — o item volta pro estado "nunca conferido" (PENDENTE).
+export async function apagarContagemItem(
+  chave: string,
+  numeroContagem: number
+): Promise<ItemAgrupadoDTO | null> {
+  const contagem = await prisma.itemConferenciaResultado.findUnique({
+    where: { chave_numeroContagem: { chave, numeroContagem } },
+  });
+  if (!contagem) return getItemAgrupado(chave);
+
+  if (contagem.fotoChaveArmazenamento) {
+    await removerFotoContagem(contagem.fotoChaveArmazenamento).catch(() => {});
+  }
+  await prisma.itemConferenciaResultado.delete({
+    where: { chave_numeroContagem: { chave, numeroContagem } },
+  });
+
+  if (numeroContagem === 1) {
+    const contagem2 = await prisma.itemConferenciaResultado.findUnique({
+      where: { chave_numeroContagem: { chave, numeroContagem: 2 } },
+    });
+    if (contagem2?.fotoChaveArmazenamento) {
+      await removerFotoContagem(contagem2.fotoChaveArmazenamento).catch(() => {});
+    }
+    await prisma.itemConferenciaResultado.deleteMany({ where: { chave, numeroContagem: 2 } });
+    await prisma.itemSolicitacaoSegundaContagem.delete({ where: { chave } }).catch(() => {});
+  }
 
   return getItemAgrupado(chave);
 }

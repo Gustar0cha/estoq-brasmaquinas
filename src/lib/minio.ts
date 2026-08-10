@@ -56,3 +56,7 @@ export async function uploadFotoContagem(
 export async function obterFotoStream(objectKey: string) {
   return minioClient.getObject(MINIO_BUCKET, objectKey);
 }
+
+export async function removerFotoContagem(objectKey: string): Promise<void> {
+  await minioClient.removeObject(MINIO_BUCKET, objectKey);
+}
