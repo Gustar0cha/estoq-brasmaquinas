@@ -134,7 +134,7 @@ async function agruparPorProdutoLocal(filtro?: { tipo?: TipoMovimentacaoSankhya 
   return grupos;
 }
 
-function calcularStatus(
+export function calcularStatus(
   contagem1: { diferenca: number } | undefined,
   contagem2: { diferenca: number } | undefined,
   temSolicitacao: boolean

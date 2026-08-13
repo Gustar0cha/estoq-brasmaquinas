@@ -3,6 +3,7 @@ import express from 'express';
 
 import { authRouter } from './routes/auth.routes';
 import { conferenciaDiariaRouter } from './routes/conferenciaDiaria.routes';
+import { contagemItensRouter, contagemRouter } from './routes/contagem.routes';
 import { divergenciasRouter } from './routes/divergencias.routes';
 import { historicoRouter } from './routes/historico.routes';
 import { itemConferenciaRouter } from './routes/itemConferencia.routes';
@@ -27,3 +28,5 @@ app.use('/divergencias', divergenciasRouter);
 app.use('/relatorios', relatoriosRouter);
 app.use('/conferencia-diaria', conferenciaDiariaRouter);
 app.use('/historico-contagem', historicoRouter);
+app.use('/contagem', contagemRouter);
+app.use('/contagem-itens', contagemItensRouter);

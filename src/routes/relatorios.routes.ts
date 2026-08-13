@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
-import { gerarRelatorioExcel } from '../services/relatorios.service';
+import { gerarRelatorioContagemExcel, gerarRelatorioExcel } from '../services/relatorios.service';
 import { StatusConferencia } from '../services/movimentacoes.service';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 
@@ -27,6 +27,23 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
+    res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
+    res.send(buffer);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível gerar o relatório.' });
+  }
+});
+
+relatoriosRouter.get('/contagem/:id/xlsx', autenticar, exigirAdmin, async (req, res) => {
+  const { id } = req.params as { id: string };
+  const { somenteDivergencias } = req.query;
+
+  try {
+    const buffer = await gerarRelatorioContagemExcel(id, somenteDivergencias === 'true');
+    const nomeArquivo = somenteDivergencias === 'true' ? 'contagem-divergencias.xlsx' : 'contagem.xlsx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
     res.send(buffer);
   } catch (error) {

@@ -309,6 +309,111 @@ export async function getMovimentoDiarioSankhya(diaRef: DiaReferencia): Promise<
   }));
 }
 
+export interface ItemCopiaEstoqueSankhya {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  localCodigo: string;
+  local: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  quantidadeEsperada: number;
+  dataCopiaEstoque: string | null;
+}
+
+interface LinhaCopiaEstoqueSankhya {
+  codigoProduto: number;
+  descricao: string;
+  unidade: string | null;
+  localCodigo: number;
+  local: string | null;
+  empresaCodigo: number;
+  empresaNome: string | null;
+  quantidadeEsperada: number;
+  dataCopiaEstoque: string | null;
+}
+
+// O gateway DbExplorerSP.executeQuery trunca silenciosamente em 5000 linhas
+// por chamada (confirmado testando: TGFCTE tem >11 mil linhas de cópia de
+// estoque válidas, e uma consulta sem paginação sempre voltava exatos 5000).
+// Pra contagem física isso é crítico — perder mais da metade dos itens sem
+// aviso invalidaria a auditoria — então pagina com OFFSET/FETCH até a
+// última página vir incompleta.
+const TAMANHO_PAGINA_SANKHYA = 5000;
+
+// Base da Contagem física (auditoria de estoque): pega a última cópia de
+// estoque (TGFCTE) disponível pra cada produto+local+empresa, sem depender
+// de nenhuma nota/movimentação — é o "retrato" oficial do que deveria estar
+// em cada prateleira. Mesmos filtros de local das outras consultas (só "RUA%"
+// de verdade, excluindo staging/auto-atendimento).
+export async function getCopiaEstoqueSankhya(empresaCodigo?: string): Promise<ItemCopiaEstoqueSankhya[]> {
+  const filtroEmpresa = empresaCodigo && Number.isFinite(Number(empresaCodigo))
+    ? `AND CTE.CODEMP = ${Number(empresaCodigo)}`
+    : '';
+
+  const todasAsLinhas: LinhaCopiaEstoqueSankhya[] = [];
+  let offset = 0;
+
+  while (true) {
+    const sql = `
+      SELECT
+        CTE.CODPROD          AS "codigoProduto",
+        PRO.DESCRPROD        AS "descricao",
+        PRO.CODVOL           AS "unidade",
+        CTE.CODLOCAL         AS "localCodigo",
+        COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL)) AS "local",
+        CTE.CODEMP           AS "empresaCodigo",
+        EMP.NOMEFANTASIA     AS "empresaNome",
+        CTE.QTDEST           AS "quantidadeEsperada",
+        TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
+      FROM TGFCTE CTE
+      INNER JOIN TGFPRO PRO ON CTE.CODPROD = PRO.CODPROD
+      LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+      LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
+      WHERE CTE.DTCONTAGEM = (
+        SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+        WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
+      )
+      AND CTE.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
+      AND UPPER(LOC.DESCRLOCAL) LIKE 'RUA%'
+      ${filtroEmpresa}
+      ORDER BY CTE.CODPROD, CTE.CODLOCAL, CTE.CODEMP
+      OFFSET ${offset} ROWS FETCH NEXT ${TAMANHO_PAGINA_SANKHYA} ROWS ONLY
+    `;
+
+    const pagina = await executarQuery<LinhaCopiaEstoqueSankhya>(sql);
+    todasAsLinhas.push(...pagina);
+
+    if (pagina.length < TAMANHO_PAGINA_SANKHYA) break;
+    offset += TAMANHO_PAGINA_SANKHYA;
+  }
+
+  return todasAsLinhas.map((linha) => ({
+    codigoProduto: String(linha.codigoProduto),
+    descricao: linha.descricao,
+    unidade: linha.unidade ?? '',
+    localCodigo: String(linha.localCodigo),
+    local: linha.local ?? '',
+    empresaCodigo: String(linha.empresaCodigo),
+    empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
+    quantidadeEsperada: linha.quantidadeEsperada,
+    dataCopiaEstoque: linha.dataCopiaEstoque,
+  }));
+}
+
+export interface EmpresaSankhya {
+  codigo: string;
+  nome: string;
+}
+
+// Lista de empresas pro seletor de "Iniciar contagem" — o admin escolhe uma
+// empresa específica ou deixa em branco pra pegar o estoque todo.
+export async function getEmpresasSankhya(): Promise<EmpresaSankhya[]> {
+  const sql = `SELECT CODEMP AS "codigo", NOMEFANTASIA AS "nome" FROM TSIEMP ORDER BY NOMEFANTASIA`;
+  const linhas = await executarQuery<{ codigo: number; nome: string | null }>(sql);
+  return linhas.map((l) => ({ codigo: String(l.codigo), nome: l.nome ?? `Empresa ${l.codigo}` }));
+}
+
 export interface EstoqueAnteriorDetalhe {
   data: string | null; // dia (YYYY-MM-DD) do snapshot TGFCTE usado — null se nunca houve cópia
   quantidade: number;
