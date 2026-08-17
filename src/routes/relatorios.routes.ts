@@ -36,12 +36,15 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
   }
 });
 
-relatoriosRouter.get('/contagem/:id/xlsx', autenticar, exigirAdmin, async (req, res) => {
-  const { id } = req.params as { id: string };
-  const { somenteDivergencias } = req.query;
+relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res) => {
+  const { dataInicio, dataFim, somenteDivergencias } = req.query;
 
   try {
-    const buffer = await gerarRelatorioContagemExcel(id, somenteDivergencias === 'true');
+    const buffer = await gerarRelatorioContagemExcel({
+      dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
+      dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+      somenteDivergencias: somenteDivergencias === 'true',
+    });
     const nomeArquivo = somenteDivergencias === 'true' ? 'contagem-divergencias.xlsx' : 'contagem.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);

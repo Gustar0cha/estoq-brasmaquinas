@@ -31,8 +31,7 @@ model Usuario {
   segundasContagensSolicitadas ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesFeitas")
   segundasContagensAtribuidas  ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesAtribuidas")
 
-  contagensIniciadas          ContagemEstoque[]
-  contagemItensAtribuidos1    ContagemItem[] @relation("ContagemItensAtribuidos1")
+  contagemItensIniciados      ContagemItem[] @relation("ContagemIniciadaPor")
   contagemItensConferidos1    ContagemItem[] @relation("ContagemConferidaPor1")
   contagemItensAtribuidos2    ContagemItem[] @relation("ContagemItensAtribuidos2")
   contagemItensConferidos2    ContagemItem[] @relation("ContagemConferidaPor2")
@@ -184,37 +183,19 @@ model Notificacao {
   @@map("notificacoes")
 }
 
-// Sessão de contagem física do estoque todo (ou de uma empresa), disparada
-// pelo admin em "Iniciar contagem". Ao contrário do fluxo de Movimentações
-// (que reconstrói o grupo produto+local ao vivo a partir das notas do
-// Sankhya a cada request), aqui a lista de itens e a quantidade esperada são
-// um retrato congelado da cópia de estoque (TGFCTE) no momento em que a
-// contagem começou — uma auditoria física não pode ficar mudando de alvo
-// enquanto as pessoas estão andando pelo depósito contando.
-model ContagemEstoque {
-  id            String    @id @default(uuid())
-  numero        Int       @default(autoincrement())
-  empresaCodigo String?
-  empresaNome   String?
-  status        String    @default("EM_ANDAMENTO")
-  iniciadaPor   Usuario   @relation(fields: [iniciadaPorId], references: [id])
-  iniciadaPorId String
-  iniciadaEm    DateTime  @default(now())
-  finalizadaEm  DateTime?
-
-  itens ContagemItem[]
-
-  @@map("contagem_estoques")
-}
-
-// Uma linha produto+local dentro de uma sessão de contagem. Guarda 1ª e 2ª
-// contagem no mesmo registro (ao contrário de ItemConferenciaResultado, que
-// usa uma linha por número de contagem) porque aqui a linha já nasce fixa
-// pra uma sessão específica — não precisa reconciliar com múltiplas notas.
+// Contagem física livre: o colaborador bipa produto+local por conta própria
+// (sem admin pré-carregar/atribuir nada) e a linha só nasce nesse momento —
+// não existe estado "pendente" esperando alguém, porque ninguém sabe que vai
+// contar aquele produto+local até o colaborador decidir contar. O sistema
+// busca a quantidade esperada na cópia de estoque (TGFCTE) ao vivo, na hora
+// do "iniciar", e guarda esse retrato pra comparar quando ele enviar.
+//
+// status: EM_ANDAMENTO (bipou, ainda não enviou a 1ª) | CONFERIDA | DIVERGENCIA
+//   | AGUARDANDO_SEGUNDA_CONTAGEM (divergiu, gestor pediu recontagem, ninguém
+//   bipou ainda pra ela) | SEGUNDA_EM_ANDAMENTO (recontagem bipada, ainda não
+//   enviada).
 model ContagemItem {
-  id         String          @id @default(uuid())
-  contagem   ContagemEstoque @relation(fields: [contagemId], references: [id], onDelete: Cascade)
-  contagemId String
+  id String @id @default(uuid())
 
   empresaCodigo      String
   empresaNome        String
@@ -226,9 +207,10 @@ model ContagemItem {
   quantidadeEsperada Float
   dataCopiaEstoque   DateTime?
 
-  status    String   @default("PENDENTE")
-  usuario   Usuario? @relation("ContagemItensAtribuidos1", fields: [usuarioId], references: [id])
-  usuarioId String?
+  status        String   @default("EM_ANDAMENTO")
+  iniciadoPor   Usuario  @relation("ContagemIniciadaPor", fields: [iniciadoPorId], references: [id])
+  iniciadoPorId String
+  iniciadoEm    DateTime @default(now())
 
   // 1ª contagem
   quantidadeConferida    Int?
@@ -249,20 +231,20 @@ model ContagemItem {
   segundaContagemSolicitadaPorId String?
   segundaContagemUsuario         Usuario? @relation("ContagemItensAtribuidos2", fields: [segundaContagemUsuarioId], references: [id])
   segundaContagemUsuarioId       String?
+  segundaContagemIniciadaEm      DateTime?
 
   // 2ª contagem
   quantidadeConferida2    Int?
-  diferenca2               Float?
-  motivo2                  String?
-  observacao2              String?
-  dataConferencia2         DateTime?
-  conferidoPor2            Usuario?  @relation("ContagemConferidaPor2", fields: [conferidoPor2Id], references: [id])
-  conferidoPor2Id          String?
-  codigoLocalBipado2       String?
-  codigoProdutoBipado2     String?
-  fotoChaveArmazenamento2  String?
+  diferenca2              Float?
+  motivo2                 String?
+  observacao2             String?
+  dataConferencia2        DateTime?
+  conferidoPor2           Usuario?  @relation("ContagemConferidaPor2", fields: [conferidoPor2Id], references: [id])
+  conferidoPor2Id         String?
+  codigoLocalBipado2      String?
+  codigoProdutoBipado2    String?
+  fotoChaveArmazenamento2 String?
 
-  @@unique([contagemId, codigoProduto, localCodigo])
   @@map("contagem_itens")
 }
 

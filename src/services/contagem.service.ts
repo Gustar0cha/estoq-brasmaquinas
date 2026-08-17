@@ -1,30 +1,16 @@
 import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
-import { getCopiaEstoqueSankhya } from '../sankhya/client';
-import { calcularStatus } from './itemConferencia.service';
-import { StatusConferencia } from './movimentacoes.service';
+import { getItemCopiaEstoque } from '../sankhya/client';
 
-export type StatusContagemEstoque = 'EM_ANDAMENTO' | 'FINALIZADA';
-
-export interface ContagemEstoqueDTO {
-  id: string;
-  numero: number;
-  empresaCodigo: string | null;
-  empresaNome: string | null;
-  status: StatusContagemEstoque;
-  iniciadaPorId: string;
-  iniciadaEm: string;
-  finalizadaEm: string | null;
-  totalItens: number;
-  pendentes: number;
-  conferidos: number;
-  comDivergencia: number;
-  aguardandoSegundaContagem: number;
-}
+export type StatusContagemItem =
+  | 'EM_ANDAMENTO'
+  | 'CONFERIDA'
+  | 'DIVERGENCIA'
+  | 'AGUARDANDO_SEGUNDA_CONTAGEM'
+  | 'SEGUNDA_EM_ANDAMENTO';
 
 export interface ContagemItemDTO {
   id: string;
-  contagemId: string;
   empresaCodigo: string;
   empresaNome: string;
   codigoProduto: string;
@@ -34,8 +20,10 @@ export interface ContagemItemDTO {
   localCodigo: string;
   quantidadeEsperada: number;
   dataCopiaEstoque?: string;
-  status: StatusConferencia;
+  status: StatusContagemItem;
   atribuidoPara: string | null;
+  iniciadoPorId: string;
+  iniciadoEm: string;
 
   // 1ª contagem
   quantidadeConferida: number | null;
@@ -52,6 +40,7 @@ export interface ContagemItemDTO {
   // 2ª contagem — só existe se foi solicitada pelo gestor
   segundaContagemSolicitada: boolean;
   segundaContagemAtribuidaPara?: string | null;
+  segundaContagemIniciadaEm?: string;
   quantidadeConferida2?: number;
   diferenca2?: number;
   motivo2?: string;
@@ -63,34 +52,43 @@ export interface ContagemItemDTO {
   temFoto2?: boolean;
 }
 
+export interface IniciarContagemItemInput {
+  iniciadoPorId: string;
+  codigoProdutoBipado: string;
+  codigoLocalBipado: string;
+}
+
 export interface EnviarContagemItemInput {
   itemId: string;
   conferidoPorId: string;
   quantidadeConferida: number;
   motivo?: string;
   observacao?: string;
-  codigoLocalBipado?: string;
-  codigoProdutoBipado?: string;
   foto?: { buffer: Buffer; mimeType: string };
 }
 
 export interface FiltroContagemItens {
-  contagemId?: string;
-  status?: StatusConferencia;
+  status?: StatusContagemItem;
   atribuidoPara?: string;
+  dataInicio?: Date;
+  dataFim?: Date;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function montarContagemItemDTO(item: any): ContagemItemDTO {
   const contagem2Registrada = item.quantidadeConferida2 !== null;
+  // Enquanto ninguém terminou a 2ª contagem, quem deve ver o item na lista é
+  // quem foi designado pra recontar — senão é quem começou a 1ª contagem (o
+  // "dono" da contagem em aberto).
   const atribuidoPara =
     item.segundaContagemSolicitada && !contagem2Registrada
       ? (item.segundaContagemUsuarioId ?? null)
-      : (item.usuarioId ?? null);
+      : item.status === 'EM_ANDAMENTO'
+        ? item.iniciadoPorId
+        : null;
 
   return {
     id: item.id,
-    contagemId: item.contagemId,
     empresaCodigo: item.empresaCodigo,
     empresaNome: item.empresaNome,
     codigoProduto: item.codigoProduto,
@@ -102,6 +100,8 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     dataCopiaEstoque: item.dataCopiaEstoque?.toISOString(),
     status: item.status,
     atribuidoPara,
+    iniciadoPorId: item.iniciadoPorId,
+    iniciadoEm: item.iniciadoEm.toISOString(),
 
     quantidadeConferida: item.quantidadeConferida,
     diferenca: item.diferenca,
@@ -116,6 +116,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
 
     segundaContagemSolicitada: item.segundaContagemSolicitada,
     segundaContagemAtribuidaPara: item.segundaContagemUsuarioId ?? null,
+    segundaContagemIniciadaEm: item.segundaContagemIniciadaEm?.toISOString(),
     quantidadeConferida2: item.quantidadeConferida2 ?? undefined,
     diferenca2: item.diferenca2 ?? undefined,
     motivo2: item.motivo2 ?? undefined,
@@ -128,140 +129,130 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
   };
 }
 
-async function calcularResumo(contagemId: string) {
-  const grupos = await prisma.contagemItem.groupBy({
-    by: ['status'],
-    where: { contagemId },
-    _count: { _all: true },
-  });
-  const mapa = Object.fromEntries(grupos.map((g) => [g.status, g._count._all]));
-
-  return {
-    totalItens: grupos.reduce((acc, g) => acc + g._count._all, 0),
-    pendentes: mapa.PENDENTE ?? 0,
-    conferidos: mapa.CONFERIDA ?? 0,
-    comDivergencia: mapa.DIVERGENCIA ?? 0,
-    aguardandoSegundaContagem: mapa.AGUARDANDO_SEGUNDA_CONTAGEM ?? 0,
-  };
+async function nomeUsuario(usuarioId: string): Promise<string> {
+  const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } });
+  return usuario?.nome ?? 'Alguém';
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function montarContagemEstoqueDTO(contagem: any, resumo: Awaited<ReturnType<typeof calcularResumo>>): ContagemEstoqueDTO {
-  return {
-    id: contagem.id,
-    numero: contagem.numero,
-    empresaCodigo: contagem.empresaCodigo,
-    empresaNome: contagem.empresaNome,
-    status: contagem.status,
-    iniciadaPorId: contagem.iniciadaPorId,
-    iniciadaEm: contagem.iniciadaEm.toISOString(),
-    finalizadaEm: contagem.finalizadaEm?.toISOString() ?? null,
-    ...resumo,
-  };
-}
-
-// A cópia de estoque (TGFCTE) vira um retrato congelado no momento em que a
-// contagem começa — os itens da sessão não mudam mais depois disso, mesmo
-// que o estoque real do Sankhya continue se movendo enquanto a auditoria
-// física está em andamento.
-export async function iniciarContagem(
-  empresaCodigo: string | null,
-  iniciadaPorId: string
-): Promise<ContagemEstoqueDTO> {
-  const itensSankhya = await getCopiaEstoqueSankhya(empresaCodigo ?? undefined);
-  if (itensSankhya.length === 0) {
-    throw new Error('Nenhum item encontrado na cópia de estoque.');
+// O colaborador bipa produto+local por conta própria — sem admin atribuir
+// nada antes. Busca a cópia de estoque ao vivo pra esse par específico; se
+// não achar (local/produto inválido ou fora das regras de conferência),
+// recusa aqui mesmo, antes de criar qualquer registro.
+export async function iniciarContagemItem(input: IniciarContagemItemInput): Promise<ContagemItemDTO> {
+  const encontrado = await getItemCopiaEstoque(input.codigoProdutoBipado, input.codigoLocalBipado);
+  if (!encontrado) {
+    throw new Error('Produto/local não encontrado na cópia de estoque atual.');
   }
 
-  // Defensivo: garante uma linha por produto+local mesmo se a cópia trouxer
-  // alguma duplicata (a unique constraint da tabela não perdoaria).
-  const porChave = new Map<string, (typeof itensSankhya)[number]>();
-  for (const item of itensSankhya) {
-    porChave.set(`${item.codigoProduto}|${item.localCodigo}`, item);
+  const item = await prisma.contagemItem.create({
+    data: {
+      empresaCodigo: encontrado.empresaCodigo,
+      empresaNome: encontrado.empresaNome,
+      codigoProduto: encontrado.codigoProduto,
+      descricao: encontrado.descricao,
+      unidade: encontrado.unidade,
+      local: encontrado.local,
+      localCodigo: encontrado.localCodigo,
+      quantidadeEsperada: encontrado.quantidadeEsperada,
+      dataCopiaEstoque: encontrado.dataCopiaEstoque ? new Date(encontrado.dataCopiaEstoque) : null,
+      status: 'EM_ANDAMENTO',
+      iniciadoPorId: input.iniciadoPorId,
+      codigoProdutoBipado: input.codigoProdutoBipado,
+      codigoLocalBipado: input.codigoLocalBipado,
+    },
+  });
+
+  const nome = await nomeUsuario(input.iniciadoPorId);
+  await prisma.notificacao.create({
+    data: {
+      tipo: 'INICIO_CONTAGEM',
+      chave: item.id,
+      titulo: 'Contagem iniciada',
+      mensagem: `${nome} começou a contar ${item.descricao} (${item.local}).`,
+    },
+  });
+
+  return montarContagemItemDTO(item);
+}
+
+// O gestor já escolheu quem faz a recontagem (solicitarSegundaContagemItem);
+// aqui é o colaborador designado bipando de novo pra confirmar fisicamente
+// que foi até o local antes de poder enviar a 2ª contagem.
+export async function iniciarSegundaContagemItem(
+  itemId: string,
+  usuarioId: string,
+  codigoProdutoBipado: string,
+  codigoLocalBipado: string
+): Promise<ContagemItemDTO> {
+  const item = await prisma.contagemItem.findUnique({ where: { id: itemId } });
+  if (!item) {
+    throw new Error('Item de contagem não encontrado.');
+  }
+  if (!item.segundaContagemSolicitada || item.segundaContagemUsuarioId !== usuarioId) {
+    throw new Error('Você não foi designado pra recontar esse item.');
+  }
+  if (item.quantidadeConferida2 !== null) {
+    throw new Error('A 2ª contagem desse item já foi registrada.');
   }
 
-  const empresaNome = empresaCodigo ? (itensSankhya[0]?.empresaNome ?? null) : null;
-
-  const contagem = await prisma.contagemEstoque.create({
-    data: { empresaCodigo, empresaNome, iniciadaPorId },
+  const atualizado = await prisma.contagemItem.update({
+    where: { id: itemId },
+    data: {
+      status: 'SEGUNDA_EM_ANDAMENTO',
+      segundaContagemIniciadaEm: new Date(),
+      codigoProdutoBipado2: codigoProdutoBipado,
+      codigoLocalBipado2: codigoLocalBipado,
+    },
   });
 
-  await prisma.contagemItem.createMany({
-    data: Array.from(porChave.values()).map((item) => ({
-      contagemId: contagem.id,
-      empresaCodigo: item.empresaCodigo,
-      empresaNome: item.empresaNome,
-      codigoProduto: item.codigoProduto,
-      descricao: item.descricao,
-      unidade: item.unidade,
-      local: item.local,
-      localCodigo: item.localCodigo,
-      quantidadeEsperada: item.quantidadeEsperada,
-      dataCopiaEstoque: item.dataCopiaEstoque ? new Date(item.dataCopiaEstoque) : null,
-    })),
+  const nome = await nomeUsuario(usuarioId);
+  await prisma.notificacao.create({
+    data: {
+      tipo: 'INICIO_SEGUNDA_CONTAGEM',
+      chave: item.id,
+      titulo: 'Recontagem iniciada',
+      mensagem: `${nome} começou a recontar ${item.descricao} (${item.local}).`,
+    },
   });
 
-  const dto = await getContagem(contagem.id);
-  if (!dto) throw new Error('Falha ao carregar a contagem recém-criada.');
-  return dto;
-}
-
-export async function listarContagens(): Promise<ContagemEstoqueDTO[]> {
-  const contagens = await prisma.contagemEstoque.findMany({ orderBy: { iniciadaEm: 'desc' } });
-  return Promise.all(contagens.map(async (c) => montarContagemEstoqueDTO(c, await calcularResumo(c.id))));
-}
-
-export async function getContagem(id: string): Promise<ContagemEstoqueDTO | null> {
-  const contagem = await prisma.contagemEstoque.findUnique({ where: { id } });
-  if (!contagem) return null;
-  return montarContagemEstoqueDTO(contagem, await calcularResumo(id));
+  return montarContagemItemDTO(atualizado);
 }
 
 export async function getContagemItens(filtro?: FiltroContagemItens): Promise<ContagemItemDTO[]> {
   const itens = await prisma.contagemItem.findMany({
     where: {
-      ...(filtro?.contagemId ? { contagemId: filtro.contagemId } : {}),
       ...(filtro?.status ? { status: filtro.status } : {}),
+      ...(filtro?.dataInicio || filtro?.dataFim
+        ? {
+            iniciadoEm: {
+              ...(filtro?.dataInicio ? { gte: filtro.dataInicio } : {}),
+              ...(filtro?.dataFim ? { lte: filtro.dataFim } : {}),
+            },
+          }
+        : {}),
     },
-    orderBy: { descricao: 'asc' },
+    orderBy: { iniciadoEm: 'desc' },
   });
 
   const dtos = itens.map(montarContagemItemDTO);
   return filtro?.atribuidoPara ? dtos.filter((i) => i.atribuidoPara === filtro.atribuidoPara) : dtos;
 }
 
-export async function getDivergenciasContagem(contagemId: string): Promise<ContagemItemDTO[]> {
-  const [divergentes, aguardando] = await Promise.all([
-    getContagemItens({ contagemId, status: 'DIVERGENCIA' }),
-    getContagemItens({ contagemId, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' }),
+export async function getDivergenciasContagem(filtro?: {
+  dataInicio?: Date;
+  dataFim?: Date;
+}): Promise<ContagemItemDTO[]> {
+  const [divergentes, aguardando, segundaEmAndamento] = await Promise.all([
+    getContagemItens({ ...filtro, status: 'DIVERGENCIA' }),
+    getContagemItens({ ...filtro, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' }),
+    getContagemItens({ ...filtro, status: 'SEGUNDA_EM_ANDAMENTO' }),
   ]);
-  return [...divergentes, ...aguardando];
+  return [...divergentes, ...aguardando, ...segundaEmAndamento];
 }
 
 export async function getContagemItem(id: string): Promise<ContagemItemDTO | null> {
   const item = await prisma.contagemItem.findUnique({ where: { id } });
   return item ? montarContagemItemDTO(item) : null;
-}
-
-export async function atribuirContagemItem(id: string, usuarioId: string | null): Promise<ContagemItemDTO | null> {
-  const item = await prisma.contagemItem.update({ where: { id }, data: { usuarioId } });
-  return montarContagemItemDTO(item);
-}
-
-export async function atribuirContagemItensEmMassa(ids: string[], usuarioId: string | null): Promise<void> {
-  await prisma.contagemItem.updateMany({ where: { id: { in: ids } }, data: { usuarioId } });
-}
-
-async function tentarFinalizarContagem(contagemId: string): Promise<void> {
-  const pendentes = await prisma.contagemItem.count({
-    where: { contagemId, status: { in: ['PENDENTE', 'AGUARDANDO_SEGUNDA_CONTAGEM'] } },
-  });
-  if (pendentes === 0) {
-    await prisma.contagemEstoque.updateMany({
-      where: { id: contagemId, status: 'EM_ANDAMENTO' },
-      data: { status: 'FINALIZADA', finalizadaEm: new Date() },
-    });
-  }
 }
 
 export async function enviarContagemItem(input: EnviarContagemItemInput): Promise<ContagemItemDTO> {
@@ -270,12 +261,10 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     throw new Error(`Item de contagem ${input.itemId} não encontrado.`);
   }
 
-  // Só é a 2ª contagem se a 1ª já divergiu e o gestor pediu recontagem —
-  // senão é sempre a 1ª (reenviar sobrescreve, mesma regra da conferência
-  // por movimentação).
-  const ehSegundaContagem =
-    item.quantidadeConferida !== null && item.diferenca !== 0 && item.segundaContagemSolicitada;
-  const numeroContagem = ehSegundaContagem ? 2 : 1;
+  const numeroContagem = item.status === 'SEGUNDA_EM_ANDAMENTO' ? 2 : 1;
+  if (numeroContagem === 1 && item.status !== 'EM_ANDAMENTO') {
+    throw new Error('Essa contagem já foi enviada.');
+  }
 
   const diferenca = input.quantidadeConferida - item.quantidadeEsperada;
   if (diferenca !== 0 && !input.motivo) {
@@ -287,11 +276,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     fotoChave = await uploadFotoContagem(item.id, numeroContagem, input.foto.buffer, input.foto.mimeType);
   }
 
-  const novoStatus = calcularStatus(
-    { diferenca: numeroContagem === 1 ? diferenca : item.diferenca! },
-    numeroContagem === 2 ? { diferenca } : item.quantidadeConferida2 !== null ? { diferenca: item.diferenca2! } : undefined,
-    numeroContagem === 1 ? item.segundaContagemSolicitada : false
-  );
+  const novoStatus: StatusContagemItem = diferenca === 0 ? 'CONFERIDA' : 'DIVERGENCIA';
 
   await prisma.contagemItem.update({
     where: { id: item.id },
@@ -304,8 +289,6 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             observacao: input.observacao ?? null,
             conferidoPorId: input.conferidoPorId,
             dataConferencia: new Date(),
-            codigoLocalBipado: input.codigoLocalBipado ?? null,
-            codigoProdutoBipado: input.codigoProdutoBipado ?? null,
             status: novoStatus,
             ...(fotoChave ? { fotoChaveArmazenamento: fotoChave } : {}),
           }
@@ -316,26 +299,33 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             observacao2: input.observacao ?? null,
             conferidoPor2Id: input.conferidoPorId,
             dataConferencia2: new Date(),
-            codigoLocalBipado2: input.codigoLocalBipado ?? null,
-            codigoProdutoBipado2: input.codigoProdutoBipado ?? null,
             segundaContagemSolicitada: false,
             status: novoStatus,
             ...(fotoChave ? { fotoChaveArmazenamento2: fotoChave } : {}),
           },
   });
 
-  if (numeroContagem === 1 && diferenca !== 0) {
+  const nome = await nomeUsuario(input.conferidoPorId);
+  const rotulo = numeroContagem === 1 ? '' : ' (2ª contagem)';
+  if (diferenca === 0) {
+    await prisma.notificacao.create({
+      data: {
+        tipo: 'FIM_CONTAGEM',
+        chave: item.id,
+        titulo: numeroContagem === 1 ? 'Contagem concluída' : 'Recontagem concluída',
+        mensagem: `${nome} contou ${item.descricao} (${item.local})${rotulo}: bateu com a cópia de estoque.`,
+      },
+    });
+  } else {
     await prisma.notificacao.create({
       data: {
         tipo: 'DIVERGENCIA_CONTAGEM',
         chave: item.id,
-        titulo: 'Divergência na contagem de estoque',
-        mensagem: `${item.descricao} (${item.local}): esperado ${item.quantidadeEsperada}, contado ${input.quantidadeConferida}.`,
+        titulo: numeroContagem === 1 ? 'Divergência na contagem de estoque' : 'Divergência na recontagem',
+        mensagem: `${nome} contou ${item.descricao} (${item.local})${rotulo}: esperado ${item.quantidadeEsperada}, contado ${input.quantidadeConferida}.`,
       },
     });
   }
-
-  await tentarFinalizarContagem(item.contagemId);
 
   const dto = await getContagemItem(item.id);
   if (!dto) throw new Error('Falha ao recarregar item de contagem.');
@@ -353,7 +343,7 @@ export async function comentarDivergenciaContagemItem(
 export async function solicitarSegundaContagemContagemItem(
   id: string,
   solicitadoPorId: string,
-  usuarioId: string | null
+  usuarioId: string
 ): Promise<ContagemItemDTO | null> {
   const item = await prisma.contagemItem.update({
     where: { id },
@@ -372,4 +362,25 @@ export async function getFotoContagemItem(id: string, numeroContagem: number) {
   const chave = numeroContagem === 2 ? item?.fotoChaveArmazenamento2 : item?.fotoChaveArmazenamento;
   if (!chave) return null;
   return obterFotoStream(chave);
+}
+
+export interface IndicadoresContagemDTO {
+  emAndamento: number;
+  conferidos: number;
+  comDivergencia: number;
+  aguardandoSegundaContagem: number;
+  segundaEmAndamento: number;
+}
+
+export async function getIndicadoresContagem(): Promise<IndicadoresContagemDTO> {
+  const grupos = await prisma.contagemItem.groupBy({ by: ['status'], _count: { _all: true } });
+  const mapa = Object.fromEntries(grupos.map((g) => [g.status, g._count._all]));
+
+  return {
+    emAndamento: mapa.EM_ANDAMENTO ?? 0,
+    conferidos: mapa.CONFERIDA ?? 0,
+    comDivergencia: mapa.DIVERGENCIA ?? 0,
+    aguardandoSegundaContagem: mapa.AGUARDANDO_SEGUNDA_CONTAGEM ?? 0,
+    segundaEmAndamento: mapa.SEGUNDA_EM_ANDAMENTO ?? 0,
+  };
 }

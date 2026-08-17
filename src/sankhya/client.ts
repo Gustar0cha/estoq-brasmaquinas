@@ -333,62 +333,54 @@ interface LinhaCopiaEstoqueSankhya {
   dataCopiaEstoque: string | null;
 }
 
-// O gateway DbExplorerSP.executeQuery trunca silenciosamente em 5000 linhas
-// por chamada (confirmado testando: TGFCTE tem >11 mil linhas de cópia de
-// estoque válidas, e uma consulta sem paginação sempre voltava exatos 5000).
-// Pra contagem física isso é crítico — perder mais da metade dos itens sem
-// aviso invalidaria a auditoria — então pagina com OFFSET/FETCH até a
-// última página vir incompleta.
-const TAMANHO_PAGINA_SANKHYA = 5000;
+// Contagem física livre: o colaborador bipa o código do produto e o código
+// do local, e a gente busca a última cópia de estoque (TGFCTE) só daquele
+// par produto+local — não precisa mais carregar o estoque inteiro (>11 mil
+// linhas, e o gateway do Sankhya trunca em 5000 por chamada de qualquer
+// forma), é uma consulta pontual de 1 linha. Mesmos filtros de local das
+// outras consultas (só "RUA%" de verdade, excluindo staging/auto-atendimento)
+// — se o colaborador bipar um local fora dessas regras, não encontra nada.
+export async function getItemCopiaEstoque(
+  codigoProduto: string,
+  localCodigo: string
+): Promise<ItemCopiaEstoqueSankhya | null> {
+  const produto = Number(codigoProduto);
+  const local = Number(localCodigo);
+  if (!Number.isFinite(produto) || !Number.isFinite(local)) {
+    return null;
+  }
 
-// Base da Contagem física (auditoria de estoque): pega a última cópia de
-// estoque (TGFCTE) disponível pra cada produto+local+empresa, sem depender
-// de nenhuma nota/movimentação — é o "retrato" oficial do que deveria estar
-// em cada prateleira. Mesmos filtros de local das outras consultas (só "RUA%"
-// de verdade, excluindo staging/auto-atendimento).
-export async function getCopiaEstoqueSankhya(empresaCodigo?: string): Promise<ItemCopiaEstoqueSankhya[]> {
-  const filtroEmpresa = empresaCodigo && Number.isFinite(Number(empresaCodigo))
-    ? `AND CTE.CODEMP = ${Number(empresaCodigo)}`
-    : '';
-
-  const todasAsLinhas: LinhaCopiaEstoqueSankhya[] = [];
-  let offset = 0;
-
-  while (true) {
-    const sql = `
-      SELECT
-        CTE.CODPROD          AS "codigoProduto",
-        PRO.DESCRPROD        AS "descricao",
-        PRO.CODVOL           AS "unidade",
-        CTE.CODLOCAL         AS "localCodigo",
-        COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL)) AS "local",
-        CTE.CODEMP           AS "empresaCodigo",
-        EMP.NOMEFANTASIA     AS "empresaNome",
-        CTE.QTDEST           AS "quantidadeEsperada",
-        TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
-      FROM TGFCTE CTE
-      INNER JOIN TGFPRO PRO ON CTE.CODPROD = PRO.CODPROD
-      LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
-      LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
-      WHERE CTE.DTCONTAGEM = (
+  const sql = `
+    SELECT
+      CTE.CODPROD          AS "codigoProduto",
+      PRO.DESCRPROD        AS "descricao",
+      PRO.CODVOL           AS "unidade",
+      CTE.CODLOCAL         AS "localCodigo",
+      COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL)) AS "local",
+      CTE.CODEMP           AS "empresaCodigo",
+      EMP.NOMEFANTASIA     AS "empresaNome",
+      CTE.QTDEST           AS "quantidadeEsperada",
+      TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
+    FROM TGFCTE CTE
+    INNER JOIN TGFPRO PRO ON CTE.CODPROD = PRO.CODPROD
+    LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+    LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
+    WHERE CTE.CODPROD = ${produto}
+      AND CTE.CODLOCAL = ${local}
+      AND CTE.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
+      AND UPPER(LOC.DESCRLOCAL) LIKE 'RUA%'
+      AND CTE.DTCONTAGEM = (
         SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
         WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
       )
-      AND CTE.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
-      AND UPPER(LOC.DESCRLOCAL) LIKE 'RUA%'
-      ${filtroEmpresa}
-      ORDER BY CTE.CODPROD, CTE.CODLOCAL, CTE.CODEMP
-      OFFSET ${offset} ROWS FETCH NEXT ${TAMANHO_PAGINA_SANKHYA} ROWS ONLY
-    `;
+    ORDER BY CTE.DTCONTAGEM DESC
+    FETCH FIRST 1 ROWS ONLY
+  `;
 
-    const pagina = await executarQuery<LinhaCopiaEstoqueSankhya>(sql);
-    todasAsLinhas.push(...pagina);
+  const [linha] = await executarQuery<LinhaCopiaEstoqueSankhya>(sql);
+  if (!linha) return null;
 
-    if (pagina.length < TAMANHO_PAGINA_SANKHYA) break;
-    offset += TAMANHO_PAGINA_SANKHYA;
-  }
-
-  return todasAsLinhas.map((linha) => ({
+  return {
     codigoProduto: String(linha.codigoProduto),
     descricao: linha.descricao,
     unidade: linha.unidade ?? '',
@@ -398,20 +390,7 @@ export async function getCopiaEstoqueSankhya(empresaCodigo?: string): Promise<It
     empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
     quantidadeEsperada: linha.quantidadeEsperada,
     dataCopiaEstoque: linha.dataCopiaEstoque,
-  }));
-}
-
-export interface EmpresaSankhya {
-  codigo: string;
-  nome: string;
-}
-
-// Lista de empresas pro seletor de "Iniciar contagem" — o admin escolhe uma
-// empresa específica ou deixa em branco pra pegar o estoque todo.
-export async function getEmpresasSankhya(): Promise<EmpresaSankhya[]> {
-  const sql = `SELECT CODEMP AS "codigo", NOMEFANTASIA AS "nome" FROM TSIEMP ORDER BY NOMEFANTASIA`;
-  const linhas = await executarQuery<{ codigo: number; nome: string | null }>(sql);
-  return linhas.map((l) => ({ codigo: String(l.codigo), nome: l.nome ?? `Empresa ${l.codigo}` }));
+  };
 }
 
 export interface EstoqueAnteriorDetalhe {

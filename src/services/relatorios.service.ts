@@ -122,20 +122,27 @@ async function coletarBufferFotoContagem(itemId: string, numeroContagem: number)
   }
 }
 
-// Relatório da Contagem física (auditoria de estoque via cópia TGFCTE) —
-// sempre de UMA sessão específica, já que cada sessão é um retrato
-// congelado próprio (não faz sentido misturar quantidades esperadas de
-// sessões diferentes na mesma planilha).
-export async function gerarRelatorioContagemExcel(
-  contagemId: string,
-  somenteDivergencias: boolean
-): Promise<ExcelJS.Buffer> {
+export interface FiltroRelatorioContagem {
+  dataInicio?: Date;
+  dataFim?: Date;
+  somenteDivergencias?: boolean;
+}
+
+// Relatório da Contagem física (auditoria de estoque via cópia TGFCTE) — a
+// contagem é livre (cada colaborador conta o que quiser, quando quiser), não
+// existe mais sessão pra agrupar; o relatório filtra por período de início
+// da contagem.
+export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContagem): Promise<ExcelJS.Buffer> {
+  const somenteDivergencias = Boolean(filtro.somenteDivergencias);
+  const base = { dataInicio: filtro.dataInicio, dataFim: filtro.dataFim };
+
   const itens = somenteDivergencias
     ? [
-        ...(await getContagemItens({ contagemId, status: 'DIVERGENCIA' })),
-        ...(await getContagemItens({ contagemId, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' })),
+        ...(await getContagemItens({ ...base, status: 'DIVERGENCIA' })),
+        ...(await getContagemItens({ ...base, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' })),
+        ...(await getContagemItens({ ...base, status: 'SEGUNDA_EM_ANDAMENTO' })),
       ]
-    : await getContagemItens({ contagemId });
+    : await getContagemItens(base);
 
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet(somenteDivergencias ? 'Divergências' : 'Contagem');

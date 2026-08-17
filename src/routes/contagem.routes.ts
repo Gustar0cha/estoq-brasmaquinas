@@ -3,77 +3,69 @@ import multer from 'multer';
 import { z } from 'zod';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
-import { getEmpresasSankhya } from '../sankhya/client';
 import * as contagemService from '../services/contagem.service';
-import { StatusConferencia } from '../services/movimentacoes.service';
+import { StatusContagemItem } from '../services/contagem.service';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 export const contagemRouter = Router();
 export const contagemItensRouter = Router();
 
-// ---- Sessões de contagem (/contagem) ----------------------------------
-
-const iniciarContagemSchema = z.object({
-  empresaCodigo: z.string().nullable().optional(),
-});
-
-contagemRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
-  const parse = iniciarContagemSchema.safeParse(req.body);
-  if (!parse.success) {
-    res.status(400).json({ erro: 'Corpo da requisição inválido.' });
-    return;
-  }
-
-  try {
-    const contagem = await contagemService.iniciarContagem(parse.data.empresaCodigo ?? null, req.usuario!.sub);
-    res.status(201).json(contagem);
-  } catch (error) {
-    res
-      .status(400)
-      .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a contagem.' });
-  }
-});
-
-contagemRouter.get('/', autenticar, async (_req, res) => {
-  res.json(await contagemService.listarContagens());
-});
-
-// Precisa vir antes de "/:id" pra não ser confundida com um id literal.
-contagemRouter.get('/empresas', autenticar, exigirAdmin, async (_req, res) => {
-  res.json(await getEmpresasSankhya());
-});
-
-contagemRouter.get('/:id', autenticar, async (req, res) => {
-  const { id } = req.params as { id: string };
-  const contagem = await contagemService.getContagem(id);
-  if (!contagem) {
-    res.status(404).json({ erro: 'Contagem não encontrada.' });
-    return;
-  }
-  res.json(contagem);
+contagemRouter.get('/indicadores', autenticar, exigirAdmin, async (_req, res) => {
+  res.json(await contagemService.getIndicadoresContagem());
 });
 
 // ---- Itens de contagem (/contagem-itens) -------------------------------
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
-  const { contagemId, status, atribuidoPara } = req.query;
+  const { status, atribuidoPara, dataInicio, dataFim } = req.query;
 
   const itens = await contagemService.getContagemItens({
-    contagemId: typeof contagemId === 'string' ? contagemId : undefined,
-    status: typeof status === 'string' ? (status as StatusConferencia) : undefined,
+    status: typeof status === 'string' ? (status as StatusContagemItem) : undefined,
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
+    dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
+    dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
   });
   res.json(itens);
 });
 
+// Precisa vir antes de "/:id" pra não ser confundida com um id literal.
 contagemItensRouter.get('/divergencias', autenticar, exigirAdmin, async (req, res) => {
-  const { contagemId } = req.query;
-  if (typeof contagemId !== 'string') {
-    res.status(400).json({ erro: 'contagemId é obrigatório.' });
+  const { dataInicio, dataFim } = req.query;
+  res.json(
+    await contagemService.getDivergenciasContagem({
+      dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
+      dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+    })
+  );
+});
+
+const iniciarContagemItemSchema = z.object({
+  codigoProdutoBipado: z.string().min(1),
+  codigoLocalBipado: z.string().min(1),
+});
+
+// O colaborador bipa produto+local por conta própria e o item nasce aqui —
+// sem admin pré-carregar ou atribuir nada antes.
+contagemItensRouter.post('/iniciar', autenticar, async (req, res) => {
+  const parse = iniciarContagemItemSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
     return;
   }
-  res.json(await contagemService.getDivergenciasContagem(contagemId));
+
+  try {
+    const item = await contagemService.iniciarContagemItem({
+      iniciadoPorId: req.usuario!.sub,
+      codigoProdutoBipado: parse.data.codigoProdutoBipado,
+      codigoLocalBipado: parse.data.codigoLocalBipado,
+    });
+    res.status(201).json(item);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a contagem.' });
+  }
 });
 
 contagemItensRouter.get('/:id', autenticar, async (req, res) => {
@@ -86,12 +78,33 @@ contagemItensRouter.get('/:id', autenticar, async (req, res) => {
   res.json(item);
 });
 
+contagemItensRouter.post('/:id/iniciar-segunda', autenticar, async (req, res) => {
+  const { id } = req.params as { id: string };
+  const parse = iniciarContagemItemSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const item = await contagemService.iniciarSegundaContagemItem(
+      id,
+      req.usuario!.sub,
+      parse.data.codigoProdutoBipado,
+      parse.data.codigoLocalBipado
+    );
+    res.json(item);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a recontagem.' });
+  }
+});
+
 const conferenciaContagemSchema = z.object({
   quantidadeConferida: z.coerce.number(),
   motivo: z.string().optional(),
   observacao: z.string().optional(),
-  codigoLocalBipado: z.string().optional(),
-  codigoProdutoBipado: z.string().optional(),
 });
 
 contagemItensRouter.post('/:id/conferencia', autenticar, upload.single('foto'), async (req, res) => {
@@ -109,8 +122,6 @@ contagemItensRouter.post('/:id/conferencia', autenticar, upload.single('foto'), 
       quantidadeConferida: parse.data.quantidadeConferida,
       motivo: parse.data.motivo,
       observacao: parse.data.observacao,
-      codigoLocalBipado: parse.data.codigoLocalBipado,
-      codigoProdutoBipado: parse.data.codigoProdutoBipado,
       foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
     });
     res.json({ ok: true, item });
@@ -122,7 +133,7 @@ contagemItensRouter.post('/:id/conferencia', autenticar, upload.single('foto'), 
 });
 
 const solicitarSegundaContagemSchema = z.object({
-  usuarioId: z.string().nullable(),
+  usuarioId: z.string().min(1),
 });
 
 contagemItensRouter.post('/:id/solicitar-segunda-contagem', autenticar, exigirAdmin, async (req, res) => {
@@ -155,38 +166,6 @@ contagemItensRouter.get('/:id/foto/:numeroContagem', autenticar, exigirAdmin, as
   } catch {
     res.status(404).json({ erro: 'Foto não encontrada.' });
   }
-});
-
-const atribuicaoSchema = z.object({
-  usuarioId: z.string().nullable(),
-});
-
-contagemItensRouter.patch('/atribuicao-em-massa', autenticar, exigirAdmin, async (req, res) => {
-  const atribuicaoEmMassaSchema = z.object({
-    ids: z.array(z.string()).min(1),
-    usuarioId: z.string().nullable(),
-  });
-
-  const parse = atribuicaoEmMassaSchema.safeParse(req.body);
-  if (!parse.success) {
-    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
-    return;
-  }
-
-  await contagemService.atribuirContagemItensEmMassa(parse.data.ids, parse.data.usuarioId);
-  res.json({ ok: true });
-});
-
-contagemItensRouter.patch('/:id/atribuicao', autenticar, exigirAdmin, async (req, res) => {
-  const { id } = req.params as { id: string };
-  const parse = atribuicaoSchema.safeParse(req.body);
-  if (!parse.success) {
-    res.status(400).json({ erro: 'Corpo da requisição inválido.' });
-    return;
-  }
-
-  const item = await contagemService.atribuirContagemItem(id, parse.data.usuarioId);
-  res.json(item);
 });
 
 const comentarioSchema = z.object({
