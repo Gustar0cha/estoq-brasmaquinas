@@ -333,13 +333,22 @@ interface LinhaCopiaEstoqueSankhya {
   dataCopiaEstoque: string | null;
 }
 
+function filtroLocalValido(aliasTabela: string): string {
+  return `
+    AND ${aliasTabela}.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
+    AND UPPER(NVL(LOC.DESCRLOCAL, ' ')) LIKE 'RUA%'
+  `;
+}
+
 // Contagem física livre: o colaborador bipa o código do produto e o código
-// do local, e a gente busca a última cópia de estoque (TGFCTE) só daquele
-// par produto+local — não precisa mais carregar o estoque inteiro (>11 mil
-// linhas, e o gateway do Sankhya trunca em 5000 por chamada de qualquer
-// forma), é uma consulta pontual de 1 linha. Mesmos filtros de local das
-// outras consultas (só "RUA%" de verdade, excluindo staging/auto-atendimento)
-// — se o colaborador bipar um local fora dessas regras, não encontra nada.
+// do local — a gente só precisa IDENTIFICAR o que ele está contando, não
+// validar contra um cadastro fechado. TGFCTE (cópia de estoque oficial) só
+// tem linha pra produto+local que já passou por uma contagem física antes,
+// então é sparse — muita prateleira válida nunca teve uma "cópia" registrada
+// e não pode travar o colaborador por isso. Tenta TGFCTE primeiro (é o
+// retrato "oficial"); se não achar, cai pro TGFEST (estoque atual ao vivo,
+// a mesma fonte usada em todo o resto do app) — sempre que o produto
+// realmente está cadastrado naquele local, um dos dois acha.
 export async function getItemCopiaEstoque(
   codigoProduto: string,
   localCodigo: string
@@ -350,7 +359,7 @@ export async function getItemCopiaEstoque(
     return null;
   }
 
-  const sql = `
+  const sqlCopia = `
     SELECT
       CTE.CODPROD          AS "codigoProduto",
       PRO.DESCRPROD        AS "descricao",
@@ -367,8 +376,7 @@ export async function getItemCopiaEstoque(
     LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
     WHERE CTE.CODPROD = ${produto}
       AND CTE.CODLOCAL = ${local}
-      AND CTE.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
-      AND UPPER(LOC.DESCRLOCAL) LIKE 'RUA%'
+      ${filtroLocalValido('CTE')}
       AND CTE.DTCONTAGEM = (
         SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
         WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
@@ -377,19 +385,55 @@ export async function getItemCopiaEstoque(
     FETCH FIRST 1 ROWS ONLY
   `;
 
-  const [linha] = await executarQuery<LinhaCopiaEstoqueSankhya>(sql);
-  if (!linha) return null;
+  const [linhaCopia] = await executarQuery<LinhaCopiaEstoqueSankhya>(sqlCopia);
+  if (linhaCopia) {
+    return {
+      codigoProduto: String(linhaCopia.codigoProduto),
+      descricao: linhaCopia.descricao,
+      unidade: linhaCopia.unidade ?? '',
+      localCodigo: String(linhaCopia.localCodigo),
+      local: linhaCopia.local ?? '',
+      empresaCodigo: String(linhaCopia.empresaCodigo),
+      empresaNome: linhaCopia.empresaNome ?? `Empresa ${linhaCopia.empresaCodigo}`,
+      quantidadeEsperada: linhaCopia.quantidadeEsperada,
+      dataCopiaEstoque: linhaCopia.dataCopiaEstoque,
+    };
+  }
+
+  const sqlEstoqueAtual = `
+    SELECT
+      EST.CODPROD          AS "codigoProduto",
+      MAX(PRO.DESCRPROD)   AS "descricao",
+      MAX(PRO.CODVOL)      AS "unidade",
+      EST.CODLOCAL         AS "localCodigo",
+      MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(EST.CODLOCAL))) AS "local",
+      EST.CODEMP           AS "empresaCodigo",
+      MAX(EMP.NOMEFANTASIA) AS "empresaNome",
+      NVL(SUM(EST.ESTOQUE), 0) AS "quantidadeEsperada"
+    FROM TGFEST EST
+    INNER JOIN TGFPRO PRO ON EST.CODPROD = PRO.CODPROD
+    LEFT JOIN TGFLOC LOC ON EST.CODLOCAL = LOC.CODLOCAL
+    LEFT JOIN TSIEMP EMP ON EST.CODEMP = EMP.CODEMP
+    WHERE EST.CODPROD = ${produto}
+      AND EST.CODLOCAL = ${local}
+      ${filtroLocalValido('EST')}
+    GROUP BY EST.CODPROD, EST.CODLOCAL, EST.CODEMP
+    FETCH FIRST 1 ROWS ONLY
+  `;
+
+  const [linhaEstoque] = await executarQuery<LinhaCopiaEstoqueSankhya>(sqlEstoqueAtual);
+  if (!linhaEstoque) return null;
 
   return {
-    codigoProduto: String(linha.codigoProduto),
-    descricao: linha.descricao,
-    unidade: linha.unidade ?? '',
-    localCodigo: String(linha.localCodigo),
-    local: linha.local ?? '',
-    empresaCodigo: String(linha.empresaCodigo),
-    empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
-    quantidadeEsperada: linha.quantidadeEsperada,
-    dataCopiaEstoque: linha.dataCopiaEstoque,
+    codigoProduto: String(linhaEstoque.codigoProduto),
+    descricao: linhaEstoque.descricao,
+    unidade: linhaEstoque.unidade ?? '',
+    localCodigo: String(linhaEstoque.localCodigo),
+    local: linhaEstoque.local ?? '',
+    empresaCodigo: String(linhaEstoque.empresaCodigo),
+    empresaNome: linhaEstoque.empresaNome ?? `Empresa ${linhaEstoque.empresaCodigo}`,
+    quantidadeEsperada: linhaEstoque.quantidadeEsperada,
+    dataCopiaEstoque: null,
   };
 }
 
