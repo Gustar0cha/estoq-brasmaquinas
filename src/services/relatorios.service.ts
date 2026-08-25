@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 
 import { ContagemItemDTO, getContagemItens, getFotoContagemItem } from './contagem.service';
 import { getFotoContagem, getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
+import { getItemCopiaEstoque } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
 
@@ -187,6 +188,58 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
         sheet.addImage(imageId, { tl: { col: 8, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
       }
     }
+  }
+
+  return workbook.xlsx.writeBuffer();
+}
+
+export interface FiltroRelatorioSistemaVsContado {
+  dataInicio?: Date;
+  dataFim?: Date;
+}
+
+// Compara o que o sistema tem HOJE (estoque atual, buscado ao vivo — não o
+// retrato de quando a contagem foi feita) contra o que foi registrado nas
+// contagens/divergências do período — mostra se o estoque "andou" desde a
+// contagem, útil pra saber se ainda vale a pena confiar num número contado
+// há um tempo.
+export async function gerarRelatorioSistemaVsContadoExcel(
+  filtro: FiltroRelatorioSistemaVsContado
+): Promise<ExcelJS.Buffer> {
+  const itens = (await getContagemItens(filtro)).filter((item) => item.quantidadeConferida !== null);
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sistema vs. Contado');
+
+  sheet.columns = [
+    { header: 'SKU', key: 'sku', width: 14 },
+    { header: 'Descrição', key: 'descricao', width: 40 },
+    { header: 'Local', key: 'local', width: 26 },
+    { header: 'Qtd. Sistema (atual)', key: 'quantidadeSistema', width: 18 },
+    { header: 'Qtd. 1ª Contagem', key: 'quantidadeConferida1', width: 16 },
+    { header: 'Qtd. 2ª Contagem', key: 'quantidadeConferida2', width: 16 },
+    { header: 'Última Contagem', key: 'ultimaContagem', width: 14 },
+    { header: 'Diferença (sistema atual − última contagem)', key: 'diferencaAtual', width: 30 },
+    { header: 'Data da Contagem', key: 'dataContagem', width: 18 },
+  ];
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };
+  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+  for (const item of itens as ContagemItemDTO[]) {
+    const atual = await getItemCopiaEstoque(item.codigoProduto, item.localCodigo);
+    const ultimaContagem = item.quantidadeConferida2 ?? item.quantidadeConferida ?? 0;
+
+    sheet.addRow({
+      sku: item.codigoProduto,
+      descricao: item.descricao,
+      local: item.local,
+      quantidadeSistema: atual?.quantidadeEsperada ?? '',
+      quantidadeConferida1: item.quantidadeConferida ?? '',
+      quantidadeConferida2: item.quantidadeConferida2 ?? '',
+      ultimaContagem: item.quantidadeConferida2 !== undefined ? '2ª' : '1ª',
+      diferencaAtual: atual ? atual.quantidadeEsperada - ultimaContagem : '',
+      dataContagem: item.dataConferencia2 ?? item.dataConferencia ?? '',
+    });
   }
 
   return workbook.xlsx.writeBuffer();

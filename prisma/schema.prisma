@@ -37,6 +37,9 @@ model Usuario {
   contagemItensConferidos2    ContagemItem[] @relation("ContagemConferidaPor2")
   contagemSegundasSolicitadas ContagemItem[] @relation("ContagemSegundaSolicitadaPor")
 
+  notificacaoPreferencias NotificacaoPreferencia[]
+  notificacoes            Notificacao[]
+
   @@map("usuarios")
 }
 
@@ -169,8 +172,10 @@ model ItemSolicitacaoSegundaContagem {
   @@map("item_solicitacoes_segunda_contagem")
 }
 
-// Central de avisos pro gestor — hoje só divergência de 1ª contagem, mas o
-// `tipo` já deixa aberto pra outros avisos no futuro sem mudar o schema.
+// Central de avisos. `usuarioId` null = destinatário padrão (todos os
+// admins, comportamento de sempre); preenchido = essa linha é só pra esse
+// usuário específico — criada quando existe NotificacaoPreferencia
+// configurada pro `tipo`, uma linha por destinatário configurado.
 model Notificacao {
   id        String   @id @default(uuid())
   tipo      String
@@ -179,8 +184,36 @@ model Notificacao {
   mensagem  String
   lida      Boolean  @default(false)
   criadoEm  DateTime @default(now())
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id])
+  usuarioId String?
 
   @@map("notificacoes")
+}
+
+// Configuração de "quem recebe qual tipo de notificação", feita pelo admin
+// em Configurações. Sem nenhuma linha pra um `tipo`, o padrão é notificar
+// todos os admins (mesmo comportamento de antes dessa configuração existir).
+model NotificacaoPreferencia {
+  id        String   @id @default(uuid())
+  tipo      String
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id])
+  usuarioId String
+  criadoEm  DateTime @default(now())
+
+  @@unique([tipo, usuarioId])
+  @@map("notificacao_preferencias")
+}
+
+// Marca produtos com estoque negativo já notificados, pra não avisar de
+// novo a cada checagem periódica — só quando o produto+empresa "some" da
+// lista de negativados (voltou a ficar >= 0) é que ele é liberado pra
+// notificar de novo se ficar negativo outra vez.
+model ProdutoNegativadoRastreado {
+  id          String   @id @default(uuid())
+  chave       String   @unique // "{empresaCodigo}|{codigoProduto}"
+  detectadoEm DateTime @default(now())
+
+  @@map("produtos_negativados_rastreados")
 }
 
 // Contagem física livre: o colaborador bipa produto+local por conta própria

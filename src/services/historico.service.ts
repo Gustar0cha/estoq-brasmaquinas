@@ -111,6 +111,86 @@ export async function getHistoricoContagem(filtro: FiltroHistorico): Promise<Res
   };
 }
 
+export interface RegistroComFotoDTO {
+  origem: 'movimentacao' | 'contagem';
+  chave: string;
+  numeroContagem: number;
+  descricao: string;
+  local: string;
+  quantidadeConferida: number;
+  conferidoPorId: string;
+  dataConferencia: string;
+}
+
+// Junta as fotos das duas fontes que hoje registram foto de contagem — a
+// conferência por movimentação (item_conferencia_resultados) e a contagem
+// física livre (contagem_itens) — numa lista só, ordenada por data. Não usa
+// ConferenciaResultado (o resto do histórico acima) porque aquele fluxo
+// antigo nunca teve campo de foto.
+export async function getRegistrosComFoto(filtro: FiltroHistorico): Promise<RegistroComFotoDTO[]> {
+  const [movimentacao, contagem] = await Promise.all([
+    prisma.itemConferenciaResultado.findMany({
+      where: {
+        fotoChaveArmazenamento: { not: null },
+        dataConferencia: { gte: filtro.dataInicio, lte: filtro.dataFim },
+      },
+      orderBy: { dataConferencia: 'desc' },
+    }),
+    prisma.contagemItem.findMany({
+      where: {
+        OR: [{ fotoChaveArmazenamento: { not: null } }, { fotoChaveArmazenamento2: { not: null } }],
+      },
+    }),
+  ]);
+
+  const registros: RegistroComFotoDTO[] = movimentacao.map((item) => ({
+    origem: 'movimentacao',
+    chave: item.chave,
+    numeroContagem: item.numeroContagem,
+    descricao: item.descricao,
+    local: item.local,
+    quantidadeConferida: item.quantidadeConferida,
+    conferidoPorId: item.conferidoPorId,
+    dataConferencia: item.dataConferencia.toISOString(),
+  }));
+
+  function dentroDoPeriodo(data: Date): boolean {
+    if (filtro.dataInicio && data < filtro.dataInicio) return false;
+    if (filtro.dataFim && data > filtro.dataFim) return false;
+    return true;
+  }
+
+  for (const item of contagem) {
+    if (item.fotoChaveArmazenamento && item.dataConferencia && dentroDoPeriodo(item.dataConferencia)) {
+      registros.push({
+        origem: 'contagem',
+        chave: item.id,
+        numeroContagem: 1,
+        descricao: item.descricao,
+        local: item.local,
+        quantidadeConferida: item.quantidadeConferida ?? 0,
+        conferidoPorId: item.conferidoPorId ?? item.iniciadoPorId,
+        dataConferencia: item.dataConferencia.toISOString(),
+      });
+    }
+    if (item.fotoChaveArmazenamento2 && item.dataConferencia2 && dentroDoPeriodo(item.dataConferencia2)) {
+      registros.push({
+        origem: 'contagem',
+        chave: item.id,
+        numeroContagem: 2,
+        descricao: item.descricao,
+        local: item.local,
+        quantidadeConferida: item.quantidadeConferida2 ?? 0,
+        conferidoPorId: item.conferidoPor2Id ?? item.iniciadoPorId,
+        dataConferencia: item.dataConferencia2.toISOString(),
+      });
+    }
+  }
+
+  registros.sort((a, b) => new Date(b.dataConferencia).getTime() - new Date(a.dataConferencia).getTime());
+  return registros;
+}
+
 function estilizarCabecalho(sheet: ExcelJS.Worksheet): void {
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };

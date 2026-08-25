@@ -1,6 +1,7 @@
 import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import { getItemCopiaEstoque } from '../sankhya/client';
+import { criarNotificacao } from './notificacao.service';
 
 export type StatusContagemItem =
   | 'EM_ANDAMENTO'
@@ -163,14 +164,12 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
   });
 
   const nome = await nomeUsuario(input.iniciadoPorId);
-  await prisma.notificacao.create({
-    data: {
-      tipo: 'INICIO_CONTAGEM',
-      chave: item.id,
-      titulo: 'Contagem iniciada',
-      mensagem: `${nome} começou a contar ${item.descricao} (${item.local}).`,
-    },
-  });
+  await criarNotificacao(
+    'INICIO_CONTAGEM',
+    item.id,
+    'Contagem iniciada',
+    `${nome} começou a contar ${item.descricao} (${item.local}).`
+  );
 
   return montarContagemItemDTO(item);
 }
@@ -206,14 +205,12 @@ export async function iniciarSegundaContagemItem(
   });
 
   const nome = await nomeUsuario(usuarioId);
-  await prisma.notificacao.create({
-    data: {
-      tipo: 'INICIO_SEGUNDA_CONTAGEM',
-      chave: item.id,
-      titulo: 'Recontagem iniciada',
-      mensagem: `${nome} começou a recontar ${item.descricao} (${item.local}).`,
-    },
-  });
+  await criarNotificacao(
+    'INICIO_SEGUNDA_CONTAGEM',
+    item.id,
+    'Recontagem iniciada',
+    `${nome} começou a recontar ${item.descricao} (${item.local}).`
+  );
 
   return montarContagemItemDTO(atualizado);
 }
@@ -308,23 +305,19 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
   const nome = await nomeUsuario(input.conferidoPorId);
   const rotulo = numeroContagem === 1 ? '' : ' (2ª contagem)';
   if (diferenca === 0) {
-    await prisma.notificacao.create({
-      data: {
-        tipo: 'FIM_CONTAGEM',
-        chave: item.id,
-        titulo: numeroContagem === 1 ? 'Contagem concluída' : 'Recontagem concluída',
-        mensagem: `${nome} contou ${item.descricao} (${item.local})${rotulo}: bateu com a cópia de estoque.`,
-      },
-    });
+    await criarNotificacao(
+      'FIM_CONTAGEM',
+      item.id,
+      numeroContagem === 1 ? 'Contagem concluída' : 'Recontagem concluída',
+      `${nome} contou ${item.descricao} (${item.local})${rotulo}: bateu com a cópia de estoque.`
+    );
   } else {
-    await prisma.notificacao.create({
-      data: {
-        tipo: 'DIVERGENCIA_CONTAGEM',
-        chave: item.id,
-        titulo: numeroContagem === 1 ? 'Divergência na contagem de estoque' : 'Divergência na recontagem',
-        mensagem: `${nome} contou ${item.descricao} (${item.local})${rotulo}: esperado ${item.quantidadeEsperada}, contado ${input.quantidadeConferida}.`,
-      },
-    });
+    await criarNotificacao(
+      'DIVERGENCIA_CONTAGEM',
+      item.id,
+      numeroContagem === 1 ? 'Divergência na contagem de estoque' : 'Divergência na recontagem',
+      `${nome} contou ${item.descricao} (${item.local})${rotulo}: esperado ${item.quantidadeEsperada}, contado ${input.quantidadeConferida}.`
+    );
   }
 
   const dto = await getContagemItem(item.id);

@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma';
 import { getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
+import { criarNotificacao } from './notificacao.service';
 
 export interface NotaOrigemDTO {
   movimentacaoId: string;
@@ -327,14 +328,12 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
   // 1ª contagem divergindo: avisa o gestor. 2ª contagem registrada: a
   // solicitação foi atendida, some da lista de "aguardando".
   if (numeroContagem === 1 && diferenca !== 0) {
-    await prisma.notificacao.create({
-      data: {
-        tipo: 'DIVERGENCIA',
-        chave: input.chave,
-        titulo: 'Divergência na conferência',
-        mensagem: `${grupo.descricao} (${grupo.local}): esperado ${grupo.quantidadeEsperada}, contado ${input.quantidadeConferida}.`,
-      },
-    });
+    await criarNotificacao(
+      'DIVERGENCIA',
+      input.chave,
+      'Divergência na conferência',
+      `${grupo.descricao} (${grupo.local}): esperado ${grupo.quantidadeEsperada}, contado ${input.quantidadeConferida}.`
+    );
   }
   if (numeroContagem === 2) {
     await prisma.itemSolicitacaoSegundaContagem.delete({ where: { chave: input.chave } }).catch(() => {});

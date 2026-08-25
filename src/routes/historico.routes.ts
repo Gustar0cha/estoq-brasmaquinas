@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
-import { gerarHistoricoExcel, getHistoricoContagem } from '../services/historico.service';
+import { gerarHistoricoExcel, getHistoricoContagem, getRegistrosComFoto } from '../services/historico.service';
 
 export const historicoRouter = Router();
 
@@ -17,6 +17,12 @@ function parseFiltro(query: Record<string, unknown>) {
 
 historicoRouter.get('/', autenticar, exigirAdmin, async (req, res) => {
   res.json(await getHistoricoContagem(parseFiltro(req.query as Record<string, unknown>)));
+});
+
+// Precisa vir antes de "/historico.xlsx" não por ordenação (paths distintos),
+// mas mantido perto pra ficar junto do resto das rotas de histórico.
+historicoRouter.get('/fotos', autenticar, exigirAdmin, async (req, res) => {
+  res.json(await getRegistrosComFoto(parseFiltro(req.query as Record<string, unknown>)));
 });
 
 historicoRouter.get('/historico.xlsx', autenticar, exigirAdmin, async (req, res) => {

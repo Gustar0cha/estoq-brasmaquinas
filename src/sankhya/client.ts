@@ -540,3 +540,84 @@ export async function getDetalheConferenciaDiariaSankhya(
       })),
   };
 }
+
+export interface ProdutoNegativadoSankhya {
+  codigoProduto: string;
+  descricao: string;
+  codigoGrupoProduto: string;
+  estoque: number;
+  empresaCodigo: string;
+  empresaNome: string;
+}
+
+interface LinhaProdutoNegativadoSankhya {
+  codigoProduto: number;
+  descricao: string;
+  codigoGrupoProduto: number;
+  estoque: number;
+  empresaCodigo: number;
+  empresaNome: string | null;
+}
+
+export interface FiltroProdutosNegativados {
+  parceiro?: string;
+  grupo?: string;
+  empresa?: string;
+}
+
+// Consulta passada pela equipe: produtos ativos com estoque negativo (algo
+// saiu do sistema sem ter entrada correspondente registrada). Paginado com
+// a mesma técnica de getCopiaEstoqueSankhya — o gateway trunca em 5000 por
+// chamada, e não dá pra garantir de antemão que negativados sempre fica
+// abaixo disso.
+export async function getProdutosNegativadosSankhya(
+  filtro?: FiltroProdutosNegativados
+): Promise<ProdutoNegativadoSankhya[]> {
+  const filtroParceiro =
+    filtro?.parceiro && Number.isFinite(Number(filtro.parceiro)) ? `AND PRO.CODPARCFORN = ${Number(filtro.parceiro)}` : '';
+  const filtroGrupo =
+    filtro?.grupo && Number.isFinite(Number(filtro.grupo)) ? `AND PRO.CODGRUPOPROD = ${Number(filtro.grupo)}` : '';
+  const filtroEmpresa =
+    filtro?.empresa && Number.isFinite(Number(filtro.empresa)) ? `AND EST.CODEMP = ${Number(filtro.empresa)}` : '';
+
+  const todasAsLinhas: LinhaProdutoNegativadoSankhya[] = [];
+  let offset = 0;
+
+  while (true) {
+    const sql = `
+      SELECT
+        EST.CODPROD       AS "codigoProduto",
+        PRO.DESCRPROD     AS "descricao",
+        PRO.CODGRUPOPROD  AS "codigoGrupoProduto",
+        EST.ESTOQUE       AS "estoque",
+        EST.CODEMP        AS "empresaCodigo",
+        EMP.NOMEFANTASIA  AS "empresaNome"
+      FROM TGFPRO PRO
+      INNER JOIN TGFEST EST ON (PRO.CODPROD = EST.CODPROD)
+      INNER JOIN TGFGRU GRU ON (PRO.CODGRUPOPROD = GRU.CODGRUPOPROD)
+      INNER JOIN TSIEMP EMP ON (EST.CODEMP = EMP.CODEMP)
+      WHERE EST.ESTOQUE < 0
+        AND PRO.ATIVO = 'S'
+        ${filtroParceiro}
+        ${filtroGrupo}
+        ${filtroEmpresa}
+      ORDER BY EST.CODEMP, PRO.DESCRPROD
+      OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY
+    `;
+
+    const pagina = await executarQuery<LinhaProdutoNegativadoSankhya>(sql);
+    todasAsLinhas.push(...pagina);
+
+    if (pagina.length < 5000) break;
+    offset += 5000;
+  }
+
+  return todasAsLinhas.map((l) => ({
+    codigoProduto: String(l.codigoProduto),
+    descricao: l.descricao,
+    codigoGrupoProduto: String(l.codigoGrupoProduto),
+    estoque: l.estoque,
+    empresaCodigo: String(l.empresaCodigo),
+    empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
+  }));
+}

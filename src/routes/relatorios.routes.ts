@@ -1,7 +1,11 @@
 import { Router } from 'express';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
-import { gerarRelatorioContagemExcel, gerarRelatorioExcel } from '../services/relatorios.service';
+import {
+  gerarRelatorioContagemExcel,
+  gerarRelatorioExcel,
+  gerarRelatorioSistemaVsContadoExcel,
+} from '../services/relatorios.service';
 import { StatusConferencia } from '../services/movimentacoes.service';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 
@@ -48,6 +52,24 @@ relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res)
     const nomeArquivo = somenteDivergencias === 'true' ? 'contagem-divergencias.xlsx' : 'contagem.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
+    res.send(buffer);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível gerar o relatório.' });
+  }
+});
+
+relatoriosRouter.get('/sistema-vs-contado/xlsx', autenticar, exigirAdmin, async (req, res) => {
+  const { dataInicio, dataFim } = req.query;
+
+  try {
+    const buffer = await gerarRelatorioSistemaVsContadoExcel({
+      dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
+      dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="sistema-vs-contado.xlsx"');
     res.send(buffer);
   } catch (error) {
     res
