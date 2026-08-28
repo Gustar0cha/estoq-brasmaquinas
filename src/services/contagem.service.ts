@@ -277,9 +277,14 @@ export async function atribuirContagemPredio(
 // ---------------------------------------------------------------------------
 
 // O item já existe (PENDENTE, atribuído pelo admin) — aqui só confirma, por
-// bipe, que o colaborador está de fato na frente do produto+local esperado.
-// Bloqueia sem exceção se o bipe não bater: normalmente indica etiqueta
-// física desatualizada (produto com a etiqueta de outro local).
+// bipe, que o colaborador está de fato no local esperado. Só valida o LOCAL
+// (a etiqueta de prateleira é gerada pelo próprio WMS/Sankhya, então o
+// código bipado bate direto com CODLOCAL). O código de produto bipado é só
+// evidência, não validação: os produtos aqui não têm CODBARRA cadastrado no
+// Sankhya, então o que a câmera lê é o código de barras real do fabricante
+// (ex: EAN-13 impresso pela TETIS/WEG/etc), que nunca vai bater com o código
+// interno do produto (CODPROD) — comparar os dois bloquearia bipes 100%
+// corretos.
 export async function iniciarContagemItem(input: IniciarContagemItemInput): Promise<ContagemItemDTO> {
   const item = await prisma.contagemItem.findUnique({ where: { id: input.itemId } });
   if (!item) {
@@ -288,9 +293,9 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
   if (item.status !== 'PENDENTE' || item.atribuidoParaId !== input.usuarioId) {
     throw new Error('Esse item não está atribuído a você.');
   }
-  if (input.codigoProdutoBipado !== item.codigoProduto || input.codigoLocalBipado !== item.localCodigo) {
+  if (input.codigoLocalBipado !== item.localCodigo) {
     throw new Error(
-      `Esse produto está cadastrado em ${item.local} — confira a etiqueta do produto/local antes de continuar.`
+      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
     );
   }
 
@@ -319,7 +324,8 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
 // O gestor já escolheu quem faz a recontagem (solicitarSegundaContagemItem);
 // aqui é o colaborador designado bipando de novo pra confirmar fisicamente
 // que foi até o local antes de poder enviar a 2ª contagem — mesma validação
-// de etiqueta que a 1ª contagem.
+// de local (só local, ver comentário em iniciarContagemItem) que a 1ª
+// contagem.
 export async function iniciarSegundaContagemItem(
   itemId: string,
   usuarioId: string,
@@ -336,9 +342,9 @@ export async function iniciarSegundaContagemItem(
   if (item.quantidadeConferida2 !== null) {
     throw new Error('A 2ª contagem desse item já foi registrada.');
   }
-  if (codigoProdutoBipado !== item.codigoProduto || codigoLocalBipado !== item.localCodigo) {
+  if (codigoLocalBipado !== item.localCodigo) {
     throw new Error(
-      `Esse produto está cadastrado em ${item.local} — confira a etiqueta do produto/local antes de continuar.`
+      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
     );
   }
 
