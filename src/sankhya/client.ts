@@ -333,22 +333,25 @@ interface LinhaCopiaEstoqueSankhya {
   dataCopiaEstoque: string | null;
 }
 
-function filtroLocalValido(aliasTabela: string): string {
-  return `
-    AND ${aliasTabela}.CODLOCAL NOT IN (${LOCAIS_EXCLUIDOS_DA_CONFERENCIA.join(', ')})
-    AND UPPER(NVL(LOC.DESCRLOCAL, ' ')) LIKE 'RUA%'
-  `;
-}
-
 // Contagem física livre: o colaborador bipa o código do produto e o código
 // do local — a gente só precisa IDENTIFICAR o que ele está contando, não
-// validar contra um cadastro fechado. TGFCTE (cópia de estoque oficial) só
-// tem linha pra produto+local que já passou por uma contagem física antes,
-// então é sparse — muita prateleira válida nunca teve uma "cópia" registrada
-// e não pode travar o colaborador por isso. Tenta TGFCTE primeiro (é o
-// retrato "oficial"); se não achar, cai pro TGFEST (estoque atual ao vivo,
-// a mesma fonte usada em todo o resto do app) — sempre que o produto
-// realmente está cadastrado naquele local, um dos dois acha.
+// validar contra um cadastro fechado ou contra listas de local "permitido"
+// (essas listas/filtro "RUA%" existem só pra a listagem de conferência por
+// movimentação, ver FILTROS_COMUNS — aqui não se aplicam: o colaborador pode
+// contar qualquer local físico que exista em TGFLOC). TGFCTE (cópia de
+// estoque oficial) só tem linha pra produto+local que já passou por uma
+// contagem física antes, e TGFEST só tem linha pra combinações que já
+// tiveram alguma movimentação — as duas são sparse, e a maior parte das
+// prateleiras válidas nunca teve nenhuma das duas registradas pra ESSE
+// produto específico (é exatamente o caso mais comum de uma contagem
+// física: achar um produto num lugar que o sistema não sabia que tinha).
+// Tenta TGFCTE primeiro (retrato "oficial"), depois TGFEST (estoque atual ao
+// vivo); se nenhuma das duas tiver a combinação exata, ainda assim libera a
+// contagem contanto que o produto e o local individualmente existam — só não
+// dá pra saber a empresa (CODEMP não existe em TGFLOC), então busca em
+// qualquer local onde esse produto já tenha estoque pra descobrir a qual
+// empresa ele pertence; quantidadeEsperada nasce 0 (sistema não tinha nada
+// registrado ali).
 export async function getItemCopiaEstoque(
   codigoProduto: string,
   localCodigo: string
@@ -376,7 +379,6 @@ export async function getItemCopiaEstoque(
     LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
     WHERE CTE.CODPROD = ${produto}
       AND CTE.CODLOCAL = ${local}
-      ${filtroLocalValido('CTE')}
       AND CTE.DTCONTAGEM = (
         SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
         WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
@@ -416,23 +418,89 @@ export async function getItemCopiaEstoque(
     LEFT JOIN TSIEMP EMP ON EST.CODEMP = EMP.CODEMP
     WHERE EST.CODPROD = ${produto}
       AND EST.CODLOCAL = ${local}
-      ${filtroLocalValido('EST')}
     GROUP BY EST.CODPROD, EST.CODLOCAL, EST.CODEMP
     FETCH FIRST 1 ROWS ONLY
   `;
 
   const [linhaEstoque] = await executarQuery<LinhaCopiaEstoqueSankhya>(sqlEstoqueAtual);
-  if (!linhaEstoque) return null;
+  if (linhaEstoque) {
+    return {
+      codigoProduto: String(linhaEstoque.codigoProduto),
+      descricao: linhaEstoque.descricao,
+      unidade: linhaEstoque.unidade ?? '',
+      localCodigo: String(linhaEstoque.localCodigo),
+      local: linhaEstoque.local ?? '',
+      empresaCodigo: String(linhaEstoque.empresaCodigo),
+      empresaNome: linhaEstoque.empresaNome ?? `Empresa ${linhaEstoque.empresaCodigo}`,
+      quantidadeEsperada: linhaEstoque.quantidadeEsperada,
+      dataCopiaEstoque: null,
+    };
+  }
+
+  return getItemSemHistoricoDeEstoque(produto, local);
+}
+
+interface LinhaProdutoSankhya {
+  codigoProduto: number;
+  descricao: string;
+  unidade: string | null;
+}
+
+interface LinhaLocalSankhya {
+  localCodigo: number;
+  local: string | null;
+}
+
+interface LinhaEmpresaDoProdutoSankhya {
+  empresaCodigo: number;
+  empresaNome: string | null;
+}
+
+// Produto e local existem e são válidos, mas nunca tiveram TGFCTE nem TGFEST
+// pra essa combinação exata — a única coisa que falta é a empresa, que só dá
+// pra descobrir olhando onde mais esse produto tem estoque.
+async function getItemSemHistoricoDeEstoque(
+  produto: number,
+  local: number
+): Promise<ItemCopiaEstoqueSankhya | null> {
+  const sqlProduto = `
+    SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
+    FROM TGFPRO PRO
+    WHERE PRO.CODPROD = ${produto} AND PRO.ATIVO = 'S'
+    FETCH FIRST 1 ROWS ONLY
+  `;
+  const [linhaProduto] = await executarQuery<LinhaProdutoSankhya>(sqlProduto);
+  if (!linhaProduto) return null;
+
+  const sqlLocal = `
+    SELECT LOC.CODLOCAL AS "localCodigo", LOC.DESCRLOCAL AS "local"
+    FROM TGFLOC LOC
+    WHERE LOC.CODLOCAL = ${local}
+    FETCH FIRST 1 ROWS ONLY
+  `;
+  const [linhaLocal] = await executarQuery<LinhaLocalSankhya>(sqlLocal);
+  if (!linhaLocal) return null;
+
+  const sqlEmpresaDoProduto = `
+    SELECT EST.CODEMP AS "empresaCodigo", MAX(EMP.NOMEFANTASIA) AS "empresaNome"
+    FROM TGFEST EST
+    LEFT JOIN TSIEMP EMP ON EST.CODEMP = EMP.CODEMP
+    WHERE EST.CODPROD = ${produto}
+    GROUP BY EST.CODEMP
+    FETCH FIRST 1 ROWS ONLY
+  `;
+  const [linhaEmpresa] = await executarQuery<LinhaEmpresaDoProdutoSankhya>(sqlEmpresaDoProduto);
+  if (!linhaEmpresa) return null;
 
   return {
-    codigoProduto: String(linhaEstoque.codigoProduto),
-    descricao: linhaEstoque.descricao,
-    unidade: linhaEstoque.unidade ?? '',
-    localCodigo: String(linhaEstoque.localCodigo),
-    local: linhaEstoque.local ?? '',
-    empresaCodigo: String(linhaEstoque.empresaCodigo),
-    empresaNome: linhaEstoque.empresaNome ?? `Empresa ${linhaEstoque.empresaCodigo}`,
-    quantidadeEsperada: linhaEstoque.quantidadeEsperada,
+    codigoProduto: String(linhaProduto.codigoProduto),
+    descricao: linhaProduto.descricao,
+    unidade: linhaProduto.unidade ?? '',
+    localCodigo: String(linhaLocal.localCodigo),
+    local: linhaLocal.local ?? '',
+    empresaCodigo: String(linhaEmpresa.empresaCodigo),
+    empresaNome: linhaEmpresa.empresaNome ?? `Empresa ${linhaEmpresa.empresaCodigo}`,
+    quantidadeEsperada: 0,
     dataCopiaEstoque: null,
   };
 }

@@ -216,6 +216,23 @@ model ProdutoNegativadoRastreado {
   @@map("produtos_negativados_rastreados")
 }
 
+// Última versão publicada do APK — o app consulta essa tabela (via rota
+// pública) toda vez que abre, compara `versionCode` com a versão instalada
+// e, se tiver uma mais nova, baixa o APK direto daqui (MinIO) e abre o
+// instalador do Android. Nunca é atualizada por linha existente: cada
+// publicação cria uma linha nova, a mais recente por `versionCode` vence.
+model AppVersao {
+  id          String   @id @default(uuid())
+  versionCode Int
+  versionName String
+  apkChave    String
+  notas       String?
+  obrigatoria Boolean  @default(false)
+  publicadoEm DateTime @default(now())
+
+  @@map("app_versoes")
+}
+
 // Contagem física livre: o colaborador bipa produto+local por conta própria
 // (sem admin pré-carregar/atribuir nada) e a linha só nasce nesse momento —
 // não existe estado "pendente" esperando alguém, porque ninguém sabe que vai

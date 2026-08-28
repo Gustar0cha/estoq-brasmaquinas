@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 
+import { appVersaoRouter } from './routes/appVersao.routes';
 import { authRouter } from './routes/auth.routes';
 import { conferenciaDiariaRouter } from './routes/conferenciaDiaria.routes';
 import { contagemItensRouter, contagemRouter } from './routes/contagem.routes';
@@ -32,3 +33,4 @@ app.use('/historico-contagem', historicoRouter);
 app.use('/contagem', contagemRouter);
 app.use('/contagem-itens', contagemItensRouter);
 app.use('/produtos-negativados', negativadosRouter);
+app.use('/app/versao', appVersaoRouter);

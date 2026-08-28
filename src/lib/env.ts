@@ -35,4 +35,7 @@ export const env = {
     bucket: obrigatoria('MINIO_BUCKET'),
     region: process.env.MINIO_REGION ?? 'us-east-1',
   },
+  // Token estático só pra publicar uma nova versão do APK (rota de deploy,
+  // não é login de usuário) — comparado direto contra o header x-publish-token.
+  appPublishToken: process.env.APP_PUBLISH_TOKEN ?? '',
 };
