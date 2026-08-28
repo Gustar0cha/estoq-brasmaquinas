@@ -689,3 +689,152 @@ export async function getProdutosNegativadosSankhya(
     empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
   }));
 }
+
+interface LinhaLocalComCopiaSankhya {
+  localCodigo: number;
+  local: string | null;
+  empresaCodigo: number;
+  empresaNome: string | null;
+  totalItens: number;
+}
+
+export interface LocalComCopiaEstoqueSankhya {
+  localCodigo: string;
+  local: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  totalItens: number;
+}
+
+// Base da contagem por prédio: todo local que teve uma cópia de estoque
+// (TGFCTE) gerada — sempre a última DTCONTAGEM por produto+local+empresa,
+// igual a mesma regra usada em getItemCopiaEstoque. Paginado (5000/página,
+// limite do gateway).
+export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalComCopiaEstoqueSankhya[]> {
+  const filtroEmpresa =
+    empresa && Number.isFinite(Number(empresa)) ? `AND CTE.CODEMP = ${Number(empresa)}` : '';
+
+  const todasAsLinhas: LinhaLocalComCopiaSankhya[] = [];
+  let offset = 0;
+
+  while (true) {
+    const sql = `
+      SELECT
+        CTE.CODLOCAL AS "localCodigo",
+        MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL))) AS "local",
+        CTE.CODEMP AS "empresaCodigo",
+        MAX(EMP.NOMEFANTASIA) AS "empresaNome",
+        COUNT(DISTINCT CTE.CODPROD) AS "totalItens"
+      FROM TGFCTE CTE
+      LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+      LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
+      WHERE CTE.DTCONTAGEM = (
+        SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+        WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
+      )
+      ${filtroEmpresa}
+      GROUP BY CTE.CODLOCAL, CTE.CODEMP
+      ORDER BY CTE.CODLOCAL
+      OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY
+    `;
+
+    const pagina = await executarQuery<LinhaLocalComCopiaSankhya>(sql);
+    todasAsLinhas.push(...pagina);
+
+    if (pagina.length < 5000) break;
+    offset += 5000;
+  }
+
+  return todasAsLinhas.map((l) => ({
+    localCodigo: String(l.localCodigo),
+    local: l.local ?? String(l.localCodigo),
+    empresaCodigo: String(l.empresaCodigo),
+    empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
+    totalItens: l.totalItens,
+  }));
+}
+
+interface LinhaItemCopiaPorLocalSankhya {
+  codigoProduto: number;
+  descricao: string;
+  unidade: string | null;
+  localCodigo: number;
+  local: string | null;
+  empresaCodigo: number;
+  empresaNome: string | null;
+  quantidadeEsperada: number;
+  dataCopiaEstoque: string | null;
+}
+
+export interface ItemCopiaEstoquePorLocalSankhya {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  localCodigo: string;
+  local: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  quantidadeEsperada: number;
+  dataCopiaEstoque: string | null;
+}
+
+// Puxa todos os itens (produto+quantidade) da cópia de estoque pra um lote
+// de locais de uma empresa — usado na hora de atribuir um prédio inteiro
+// (todos os locais daquele prédio de uma vez), em vez de consultar
+// produto a produto.
+export async function getItensCopiaEstoquePorLocais(
+  localCodigos: string[],
+  empresa: string
+): Promise<ItemCopiaEstoquePorLocalSankhya[]> {
+  const locaisValidos = localCodigos.map((l) => Number(l)).filter((l) => Number.isFinite(l));
+  const empresaNum = Number(empresa);
+  if (locaisValidos.length === 0 || !Number.isFinite(empresaNum)) return [];
+
+  const todasAsLinhas: LinhaItemCopiaPorLocalSankhya[] = [];
+  let offset = 0;
+
+  while (true) {
+    const sql = `
+      SELECT
+        CTE.CODPROD          AS "codigoProduto",
+        PRO.DESCRPROD        AS "descricao",
+        PRO.CODVOL           AS "unidade",
+        CTE.CODLOCAL         AS "localCodigo",
+        COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL)) AS "local",
+        CTE.CODEMP           AS "empresaCodigo",
+        EMP.NOMEFANTASIA     AS "empresaNome",
+        CTE.QTDEST           AS "quantidadeEsperada",
+        TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
+      FROM TGFCTE CTE
+      INNER JOIN TGFPRO PRO ON CTE.CODPROD = PRO.CODPROD
+      LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+      LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
+      WHERE CTE.CODLOCAL IN (${locaisValidos.join(', ')})
+        AND CTE.CODEMP = ${empresaNum}
+        AND CTE.DTCONTAGEM = (
+          SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+          WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
+        )
+      ORDER BY CTE.CODLOCAL, CTE.CODPROD
+      OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY
+    `;
+
+    const pagina = await executarQuery<LinhaItemCopiaPorLocalSankhya>(sql);
+    todasAsLinhas.push(...pagina);
+
+    if (pagina.length < 5000) break;
+    offset += 5000;
+  }
+
+  return todasAsLinhas.map((l) => ({
+    codigoProduto: String(l.codigoProduto),
+    descricao: l.descricao,
+    unidade: l.unidade ?? '',
+    localCodigo: String(l.localCodigo),
+    local: l.local ?? String(l.localCodigo),
+    empresaCodigo: String(l.empresaCodigo),
+    empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
+    quantidadeEsperada: l.quantidadeEsperada,
+    dataCopiaEstoque: l.dataCopiaEstoque,
+  }));
+}

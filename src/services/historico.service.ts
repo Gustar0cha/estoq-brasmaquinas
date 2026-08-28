@@ -169,7 +169,7 @@ export async function getRegistrosComFoto(filtro: FiltroHistorico): Promise<Regi
         descricao: item.descricao,
         local: item.local,
         quantidadeConferida: item.quantidadeConferida ?? 0,
-        conferidoPorId: item.conferidoPorId ?? item.iniciadoPorId,
+        conferidoPorId: item.conferidoPorId ?? item.iniciadoPorId ?? '',
         dataConferencia: item.dataConferencia.toISOString(),
       });
     }
@@ -181,7 +181,7 @@ export async function getRegistrosComFoto(filtro: FiltroHistorico): Promise<Regi
         descricao: item.descricao,
         local: item.local,
         quantidadeConferida: item.quantidadeConferida2 ?? 0,
-        conferidoPorId: item.conferidoPor2Id ?? item.iniciadoPorId,
+        conferidoPorId: item.conferidoPor2Id ?? item.iniciadoPorId ?? '',
         dataConferencia: item.dataConferencia2.toISOString(),
       });
     }

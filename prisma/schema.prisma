@@ -36,6 +36,8 @@ model Usuario {
   contagemItensAtribuidos2    ContagemItem[] @relation("ContagemItensAtribuidos2")
   contagemItensConferidos2    ContagemItem[] @relation("ContagemConferidaPor2")
   contagemSegundasSolicitadas ContagemItem[] @relation("ContagemSegundaSolicitadaPor")
+  contagemItensAtribuidos     ContagemItem[] @relation("ContagemAtribuidaPara")
+  contagemItensQueAtribuiu    ContagemItem[] @relation("ContagemAtribuidaPor")
 
   notificacaoPreferencias NotificacaoPreferencia[]
   notificacoes            Notificacao[]
@@ -257,10 +259,27 @@ model ContagemItem {
   quantidadeEsperada Float
   dataCopiaEstoque   DateTime?
 
-  status        String   @default("EM_ANDAMENTO")
-  iniciadoPor   Usuario  @relation("ContagemIniciadaPor", fields: [iniciadoPorId], references: [id])
-  iniciadoPorId String
-  iniciadoEm    DateTime @default(now())
+  // Rua/prédio extraídos de `local` na hora da atribuição (parsearLocalizacao,
+  // ver src/sankhya/localizacao.ts) — persistidos, não recalculados depois,
+  // pra agrupar a contagem por prédio mesmo que a descrição mude no Sankhya.
+  // Null quando o local não bate com o padrão rua/prédio reconhecido.
+  rua    String?
+  predio String?
+
+  // status "PENDENTE" = atribuído pelo admin, ainda não bipado pelo colaborador.
+  status        String   @default("PENDENTE")
+  iniciadoPor   Usuario? @relation("ContagemIniciadaPor", fields: [iniciadoPorId], references: [id])
+  iniciadoPorId String?
+  iniciadoEm    DateTime?
+
+  // Atribuição da 1ª contagem — quem deve contar esse item e quem atribuiu.
+  // Preenchida na criação (atribuirContagemPredio); iniciadoPor/iniciadoEm só
+  // são preenchidos quando o colaborador efetivamente bipa e começa a contar.
+  atribuidoPara   Usuario? @relation("ContagemAtribuidaPara", fields: [atribuidoParaId], references: [id])
+  atribuidoParaId String?
+  atribuidoPor    Usuario? @relation("ContagemAtribuidaPor", fields: [atribuidoPorId], references: [id])
+  atribuidoPorId  String?
+  atribuidoEm     DateTime @default(now())
 
   // 1ª contagem
   quantidadeConferida    Int?

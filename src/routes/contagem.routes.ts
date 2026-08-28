@@ -15,6 +15,42 @@ contagemRouter.get('/indicadores', autenticar, exigirAdmin, async (_req, res) =>
   res.json(await contagemService.getIndicadoresContagem());
 });
 
+contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (_req, res) => {
+  res.json(await contagemService.getProgressoContagemPorPredio());
+});
+
+contagemRouter.get('/locais', autenticar, exigirAdmin, async (req, res) => {
+  const { empresa } = req.query;
+  res.json(await contagemService.getPrediosDisponiveis(typeof empresa === 'string' ? empresa : undefined));
+});
+
+const atribuirContagemSchema = z.object({
+  rua: z.string().nullable(),
+  predio: z.string().nullable(),
+  empresaCodigo: z.string().min(1),
+  atribuidoParaId: z.string().min(1),
+});
+
+contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
+  const parse = atribuirContagemSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const resultado = await contagemService.atribuirContagemPredio({
+      ...parse.data,
+      atribuidoPorId: req.usuario!.sub,
+    });
+    res.status(201).json(resultado);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível atribuir a contagem.' });
+  }
+});
+
 // ---- Itens de contagem (/contagem-itens) -------------------------------
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
@@ -45,9 +81,10 @@ const iniciarContagemItemSchema = z.object({
   codigoLocalBipado: z.string().min(1),
 });
 
-// O colaborador bipa produto+local por conta própria e o item nasce aqui —
-// sem admin pré-carregar ou atribuir nada antes.
-contagemItensRouter.post('/iniciar', autenticar, async (req, res) => {
+// O item já existe (PENDENTE, atribuído pelo admin) — aqui o colaborador só
+// confirma por bipe que está de fato no produto+local esperado.
+contagemItensRouter.post('/:id/iniciar', autenticar, async (req, res) => {
+  const { id } = req.params as { id: string };
   const parse = iniciarContagemItemSchema.safeParse(req.body);
   if (!parse.success) {
     res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
@@ -56,11 +93,12 @@ contagemItensRouter.post('/iniciar', autenticar, async (req, res) => {
 
   try {
     const item = await contagemService.iniciarContagemItem({
-      iniciadoPorId: req.usuario!.sub,
+      itemId: id,
+      usuarioId: req.usuario!.sub,
       codigoProdutoBipado: parse.data.codigoProdutoBipado,
       codigoLocalBipado: parse.data.codigoLocalBipado,
     });
-    res.status(201).json(item);
+    res.json(item);
   } catch (error) {
     res
       .status(400)

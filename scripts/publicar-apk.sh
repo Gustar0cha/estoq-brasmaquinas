@@ -19,7 +19,7 @@ fi
 
 curl -sS -X POST "$BASE_URL/app/versao" \
   -H "x-publish-token: $APP_PUBLISH_TOKEN" \
-  -F "apk=@${APK_PATH};type=application/vnd.android.package-archive" \
+  -F "apk=@${APK_PATH}" \
   -F "versionCode=${VERSION_CODE}" \
   -F "versionName=${VERSION_NAME}" \
   -F "notas=${NOTAS}" \

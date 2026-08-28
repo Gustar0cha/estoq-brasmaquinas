@@ -44,6 +44,19 @@ export async function criarNotificacao(
   });
 }
 
+// Pra avisos que são sempre pra UMA pessoa específica (ex: "você recebeu uma
+// atribuição de contagem") — não passa pela resolução de preferência, porque
+// não é um tipo de alerta configurável pelo admin, é uma mensagem direta.
+export async function notificarUsuario(
+  tipo: string,
+  chave: string,
+  titulo: string,
+  mensagem: string,
+  usuarioId: string
+): Promise<void> {
+  await prisma.notificacao.create({ data: { tipo, chave, titulo, mensagem, usuarioId } });
+}
+
 // Admin sempre vê as notificações "padrão" (usuarioId null) além das suas
 // próprias; um operador só vê o que foi explicitamente configurado pra ele.
 export async function getNotificacoes(usuarioId: string, isAdmin: boolean): Promise<NotificacaoDTO[]> {
