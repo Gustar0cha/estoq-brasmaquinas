@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 
+import { prisma } from '../lib/prisma';
 import { ContagemItemDTO, getContagemItens, getFotoContagemItem } from './contagem.service';
 import { getFotoContagem, getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
 import { getItemCopiaEstoque } from '../sankhya/client';
@@ -140,10 +141,16 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
   const itens = somenteDivergencias
     ? [
         ...(await getContagemItens({ ...base, status: 'DIVERGENCIA' })),
+        ...(await getContagemItens({ ...base, status: 'DIVERGENCIA_LOCAL' })),
         ...(await getContagemItens({ ...base, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' })),
         ...(await getContagemItens({ ...base, status: 'SEGUNDA_EM_ANDAMENTO' })),
       ]
     : await getContagemItens(base);
+
+  // Nome de quem ficou responsável — a atribuição agora é rastreada de
+  // verdade (atribuidoParaId), então dá pra dizer quem contou cada linha.
+  const usuarios = await prisma.usuario.findMany({ select: { id: true, nome: true } });
+  const nomePorId = new Map(usuarios.map((u) => [u.id, u.nome]));
 
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet(somenteDivergencias ? 'Divergências' : 'Contagem');
@@ -152,6 +159,11 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
     { header: 'SKU', key: 'sku', width: 14 },
     { header: 'Descrição', key: 'descricao', width: 40 },
     { header: 'Local', key: 'local', width: 26 },
+    { header: 'Rua', key: 'rua', width: 8 },
+    { header: 'Prédio', key: 'predio', width: 8 },
+    { header: 'Atribuído para', key: 'atribuidoPara', width: 22 },
+    { header: 'Divergência de Local', key: 'divergenciaLocal', width: 18 },
+    { header: 'Local Esperado no Sistema', key: 'localEsperado', width: 30 },
     { header: 'Qtd. Cópia de Estoque', key: 'quantidadeEsperada', width: 18 },
     { header: 'Qtd. 1ª Contagem', key: 'quantidadeConferida1', width: 16 },
     { header: 'Qtd. 2ª Contagem', key: 'quantidadeConferida2', width: 16 },
@@ -167,6 +179,11 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
       sku: item.codigoProduto,
       descricao: item.descricao,
       local: item.local,
+      rua: item.rua ?? '',
+      predio: item.predio ?? '',
+      atribuidoPara: item.atribuidoPara ? (nomePorId.get(item.atribuidoPara) ?? '') : '',
+      divergenciaLocal: item.divergenciaLocal ? 'SIM' : '',
+      localEsperado: item.localEsperado ?? '',
       quantidadeEsperada: item.quantidadeEsperada,
       quantidadeConferida1: item.quantidadeConferida ?? '',
       quantidadeConferida2: item.quantidadeConferida2 ?? '',
@@ -178,14 +195,14 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
       const buffer = await coletarBufferFotoContagem(item.id, 1);
       if (buffer) {
         const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 7, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
+        sheet.addImage(imageId, { tl: { col: 12, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
       }
     }
     if (item.temFoto2) {
       const buffer = await coletarBufferFotoContagem(item.id, 2);
       if (buffer) {
         const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 8, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
+        sheet.addImage(imageId, { tl: { col: 13, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
       }
     }
   }

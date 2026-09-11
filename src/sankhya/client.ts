@@ -489,7 +489,23 @@ async function getItemSemHistoricoDeEstoque(
     GROUP BY EST.CODEMP
     FETCH FIRST 1 ROWS ONLY
   `;
-  const [linhaEmpresa] = await executarQuery<LinhaEmpresaDoProdutoSankhya>(sqlEmpresaDoProduto);
+  let [linhaEmpresa] = await executarQuery<LinhaEmpresaDoProdutoSankhya>(sqlEmpresaDoProduto);
+
+  // Produto sem nenhuma linha em TGFEST (nunca movimentou, mas já apareceu
+  // numa cópia de estoque) — descobre a empresa pela própria cópia. Sem esse
+  // fallback o app recusava contar itens legítimos achados na prateleira.
+  if (!linhaEmpresa) {
+    const sqlEmpresaPelaCopia = `
+      SELECT CTE.CODEMP AS "empresaCodigo", MAX(EMP.NOMEFANTASIA) AS "empresaNome"
+      FROM TGFCTE CTE
+      LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
+      WHERE CTE.CODPROD = ${produto}
+      GROUP BY CTE.CODEMP
+      ORDER BY CTE.CODEMP
+      FETCH FIRST 1 ROWS ONLY
+    `;
+    [linhaEmpresa] = await executarQuery<LinhaEmpresaDoProdutoSankhya>(sqlEmpresaPelaCopia);
+  }
   if (!linhaEmpresa) return null;
 
   return {
@@ -836,5 +852,144 @@ export async function getItensCopiaEstoquePorLocais(
     empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
     quantidadeEsperada: l.quantidadeEsperada,
     dataCopiaEstoque: l.dataCopiaEstoque,
+  }));
+}
+
+interface LinhaProdutoBuscaSankhya {
+  codigoProduto: number;
+  descricao: string;
+  unidade: string | null;
+}
+
+export interface ProdutoBuscaSankhya {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+}
+
+// O gateway DbExplorerSP não aceita bind parameters (só string de SQL), então
+// todo texto vindo do app precisa ser higienizado à mão antes de entrar na
+// query — aqui só sobra o que pode aparecer numa descrição de produto.
+function sanitizarTermoBusca(termo: string): string {
+  return termo
+    .toUpperCase()
+    .replace(/[^A-Z0-9ÁÀÂÃÉÊÍÓÔÕÚÇ ./-]/g, ' ')
+    // O hífen precisa sobreviver (as descrições são cheias de "9008-319-1350"),
+    // mas "--" é comentário de linha e o gateway do Sankhya o remove ANTES de
+    // mandar pro Oracle — o que corta a query no meio e deixa a aspas aberta
+    // (ORA-01756, confirmado em teste). Colapsar a sequência resolve.
+    .replace(/-{2,}/g, '-')
+    .trim()
+    .slice(0, 60);
+}
+
+// Busca de produto por código ou descrição — usada quando o colaborador acha
+// um item que não estava na lista dele (item fora do lugar) e precisa dizer
+// QUAL produto é. Não dá pra resolver isso pelo código de barras bipado:
+// os produtos aqui não têm CODBARRA cadastrado no Sankhya, o que a câmera lê
+// é o EAN do fabricante.
+export async function buscarProdutosSankhya(termo: string): Promise<ProdutoBuscaSankhya[]> {
+  const texto = sanitizarTermoBusca(termo);
+  if (texto.length < 2) return [];
+
+  // Código digitado inteiro vem primeiro na lista: sem isso o match exato fica
+  // enterrado no meio das descrições que contêm o mesmo número.
+  const ehCodigo = /^[0-9]+$/.test(texto) && Number.isFinite(Number(texto));
+  const codigo = Number(texto);
+  const filtroCodigo = ehCodigo ? `PRO.CODPROD = ${codigo} OR` : '';
+  const ordemCodigo = ehCodigo ? `CASE WHEN PRO.CODPROD = ${codigo} THEN 0 ELSE 1 END,` : '';
+
+  const sql = `
+    SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
+    FROM TGFPRO PRO
+    WHERE PRO.ATIVO = 'S'
+      AND (${filtroCodigo} UPPER(PRO.DESCRPROD) LIKE '%${texto}%')
+    ORDER BY ${ordemCodigo} PRO.CODPROD
+    FETCH FIRST 30 ROWS ONLY
+  `;
+
+  const linhas = await executarQuery<LinhaProdutoBuscaSankhya>(sql);
+  return linhas.map((l) => ({
+    codigoProduto: String(l.codigoProduto),
+    descricao: l.descricao,
+    unidade: l.unidade ?? '',
+  }));
+}
+
+interface LinhaLocalEsperadoSankhya {
+  localCodigo: number;
+  local: string | null;
+  quantidade: number;
+}
+
+export interface LocalEsperadoSankhya {
+  localCodigo: string;
+  local: string;
+  quantidade: number;
+}
+
+// Onde o ERP dizia que o produto deveria estar — base do alerta de
+// "divergência de local": o colaborador achou o produto na prateleira X, e
+// isso aqui responde "mas o sistema esperava ele em Y". Olha primeiro a
+// cópia de estoque (TGFCTE, o retrato oficial da contagem) e cai pro estoque
+// atual (TGFEST) quando o produto nunca entrou numa cópia.
+export async function getLocaisEsperadosDoProduto(
+  codigoProduto: string,
+  empresa?: string
+): Promise<LocalEsperadoSankhya[]> {
+  const produto = Number(codigoProduto);
+  if (!Number.isFinite(produto)) return [];
+  const empresaNum = Number(empresa);
+  const filtroEmpresaCte = Number.isFinite(empresaNum) ? `AND CTE.CODEMP = ${empresaNum}` : '';
+  const filtroEmpresaEst = Number.isFinite(empresaNum) ? `AND EST.CODEMP = ${empresaNum}` : '';
+
+  const sqlCopia = `
+    SELECT
+      CTE.CODLOCAL AS "localCodigo",
+      MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL))) AS "local",
+      NVL(SUM(CTE.QTDEST), 0) AS "quantidade"
+    FROM TGFCTE CTE
+    LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+    WHERE CTE.CODPROD = ${produto}
+      ${filtroEmpresaCte}
+      AND CTE.DTCONTAGEM = (
+        SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
+        WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
+      )
+    GROUP BY CTE.CODLOCAL
+    HAVING NVL(SUM(CTE.QTDEST), 0) > 0
+    ORDER BY 3 DESC
+    FETCH FIRST 10 ROWS ONLY
+  `;
+
+  const linhasCopia = await executarQuery<LinhaLocalEsperadoSankhya>(sqlCopia);
+  if (linhasCopia.length > 0) {
+    return linhasCopia.map((l) => ({
+      localCodigo: String(l.localCodigo),
+      local: l.local ?? String(l.localCodigo),
+      quantidade: l.quantidade,
+    }));
+  }
+
+  const sqlEstoque = `
+    SELECT
+      EST.CODLOCAL AS "localCodigo",
+      MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(EST.CODLOCAL))) AS "local",
+      NVL(SUM(EST.ESTOQUE), 0) AS "quantidade"
+    FROM TGFEST EST
+    LEFT JOIN TGFLOC LOC ON EST.CODLOCAL = LOC.CODLOCAL
+    WHERE EST.CODPROD = ${produto}
+      ${filtroEmpresaEst}
+    GROUP BY EST.CODLOCAL
+    HAVING NVL(SUM(EST.ESTOQUE), 0) > 0
+    ORDER BY 3 DESC
+    FETCH FIRST 10 ROWS ONLY
+  `;
+
+  const linhasEstoque = await executarQuery<LinhaLocalEsperadoSankhya>(sqlEstoque);
+  return linhasEstoque.map((l) => ({
+    localCodigo: String(l.localCodigo),
+    local: l.local ?? String(l.localCodigo),
+    quantidade: l.quantidade,
   }));
 }

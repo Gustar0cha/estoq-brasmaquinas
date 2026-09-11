@@ -4,7 +4,7 @@ import { conferirHash } from '../lib/senha';
 
 export interface LoginResultado {
   token: string;
-  usuario: { id: string; nome: string; login: string; role: 'ADMIN' | 'OPERADOR' };
+  usuario: { id: string; nome: string; login: string; role: 'ADMIN' | 'OPERADOR'; filial: string | null };
 }
 
 export async function login(login: string, senha: string): Promise<LoginResultado> {
@@ -22,6 +22,12 @@ export async function login(login: string, senha: string): Promise<LoginResultad
 
   return {
     token,
-    usuario: { id: usuario.id, nome: usuario.nome, login: usuario.login, role: usuario.role },
+    usuario: {
+      id: usuario.id,
+      nome: usuario.nome,
+      login: usuario.login,
+      role: usuario.role,
+      filial: usuario.filial ?? null,
+    },
   };
 }

@@ -25,6 +25,7 @@ const criarUsuarioSchema = z.object({
   login: z.string().min(1),
   senha: z.string().min(4),
   role: z.enum(['ADMIN', 'OPERADOR']),
+  filial: z.string().nullable().optional(),
 });
 
 usuariosRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
@@ -46,6 +47,7 @@ const atualizarUsuarioSchema = z.object({
   login: z.string().min(1).optional(),
   senha: z.string().min(4).optional(),
   role: z.enum(['ADMIN', 'OPERADOR']).optional(),
+  filial: z.string().nullable().optional(),
 });
 
 usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {

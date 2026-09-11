@@ -1,17 +1,27 @@
 import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
+  buscarProdutosSankhya,
+  getItemCopiaEstoque,
   getItensCopiaEstoquePorLocais,
   getLocaisComCopiaEstoque,
+  getLocaisEsperadosDoProduto,
+  ProdutoBuscaSankhya,
 } from '../sankhya/client';
 import { chavePredio, parsearLocalizacao } from '../sankhya/localizacao';
+import { ehFilial, Filial, filialDoLocal, labelFilial, localVisivelPara, prefixoDaFilial } from '../lib/filiais';
 import { criarNotificacao, notificarUsuario } from './notificacao.service';
 
+// DIVERGENCIA_LOCAL = o produto foi contado numa prateleira diferente da que
+// o ERP esperava (item fora do lugar). É um status final próprio, e não um
+// sabor de DIVERGENCIA, porque a providência do admin é outra: aqui o
+// problema é endereçamento/etiqueta, não quantidade.
 export type StatusContagemItem =
   | 'PENDENTE'
   | 'EM_ANDAMENTO'
   | 'CONFERIDA'
   | 'DIVERGENCIA'
+  | 'DIVERGENCIA_LOCAL'
   | 'AGUARDANDO_SEGUNDA_CONTAGEM'
   | 'SEGUNDA_EM_ANDAMENTO';
 
@@ -36,6 +46,9 @@ export interface ContagemItemDTO {
   status: StatusContagemItem;
   rua: string | null;
   predio: string | null;
+  filial: Filial | null;
+  divergenciaLocal: boolean;
+  localEsperado?: string;
   atribuidoPara: string | null;
   atribuidoPorId?: string;
   atribuidoEm: string;
@@ -90,6 +103,9 @@ export interface FiltroContagemItens {
   atribuidoPara?: string;
   dataInicio?: Date;
   dataFim?: Date;
+  // Loja de quem está pedindo: esconde da lista os locais das outras lojas
+  // (o prefixo do CODLOCAL é que diz a filial — ver src/lib/filiais.ts).
+  filial?: string | null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -117,6 +133,9 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     status: item.status,
     rua: item.rua ?? null,
     predio: item.predio ?? null,
+    filial: filialDoLocal(item.localCodigo),
+    divergenciaLocal: item.divergenciaLocal ?? false,
+    localEsperado: item.localEsperado ?? undefined,
     atribuidoPara,
     atribuidoPorId: item.atribuidoPorId ?? undefined,
     atribuidoEm: item.atribuidoEm.toISOString(),
@@ -161,6 +180,7 @@ async function nomeUsuario(usuarioId: string): Promise<string> {
 export interface PredioDisponivel {
   rua: string | null;
   predio: string | null;
+  filial: Filial | null;
   empresaCodigo: string;
   empresaNome: string;
   totalItens: number;
@@ -171,18 +191,27 @@ export interface PredioDisponivel {
 // Agrupa os locais que têm cópia de estoque (TGFCTE) por rua/prédio — é essa
 // lista que o admin navega pra escolher o que atribuir. Locais sem rua/prédio
 // reconhecível caem num grupo { rua: null, predio: null } ("Outros locais").
-export async function getPrediosDisponiveis(empresa?: string): Promise<PredioDisponivel[]> {
-  const locais = await getLocaisComCopiaEstoque(empresa);
+// `filial` esconde os locais das outras lojas (prefixo do CODLOCAL): quem
+// tem loja definida nunca enxerga prateleira de outra filial, nem pra
+// atribuir.
+export async function getPrediosDisponiveis(
+  empresa?: string,
+  filial?: string | null
+): Promise<PredioDisponivel[]> {
+  const todosOsLocais = await getLocaisComCopiaEstoque(empresa);
+  const locais = todosOsLocais.filter((l) => localVisivelPara(l.localCodigo, filial));
   const grupos = new Map<string, PredioDisponivel>();
 
   for (const local of locais) {
     const { rua, predio } = parsearLocalizacao(local.local);
-    const chave = `${local.empresaCodigo}|${chavePredio(rua, predio)}`;
+    const filialDoGrupo = filialDoLocal(local.localCodigo);
+    const chave = `${local.empresaCodigo}|${filialDoGrupo ?? '-'}|${chavePredio(rua, predio)}`;
     let grupo = grupos.get(chave);
     if (!grupo) {
       grupo = {
         rua,
         predio,
+        filial: filialDoGrupo,
         empresaCodigo: local.empresaCodigo,
         empresaNome: local.empresaNome,
         totalItens: 0,
@@ -198,6 +227,7 @@ export async function getPrediosDisponiveis(empresa?: string): Promise<PredioDis
 
   return Array.from(grupos.values()).sort((a, b) => {
     if (a.empresaCodigo !== b.empresaCodigo) return a.empresaCodigo.localeCompare(b.empresaCodigo);
+    if (a.filial !== b.filial) return (a.filial ?? 'zzz').localeCompare(b.filial ?? 'zzz');
     if (a.rua !== b.rua) return (a.rua ?? 'zzz').localeCompare(b.rua ?? 'zzz');
     return (a.predio ?? 'zzz').localeCompare(b.predio ?? 'zzz');
   });
@@ -210,19 +240,40 @@ export async function getPrediosDisponiveis(empresa?: string): Promise<PredioDis
 export interface AtribuirContagemPredioInput {
   rua: string | null;
   predio: string | null;
+  filial?: string | null;
   empresaCodigo: string;
   atribuidoParaId: string;
   atribuidoPorId: string;
+}
+
+// Ninguém recebe prateleira de outra loja: se o colaborador tem filial
+// definida, o prédio atribuído precisa ser da mesma filial.
+async function exigirFilialCompativel(usuarioId: string, filialDoPredio: Filial | null): Promise<void> {
+  const usuario = await prisma.usuario.findUnique({ where: { id: usuarioId } });
+  if (!usuario) throw new Error('Colaborador não encontrado.');
+  if (!ehFilial(usuario.filial)) return;
+  if (usuario.filial !== filialDoPredio) {
+    throw new Error(
+      `${usuario.nome} é da loja ${labelFilial(usuario.filial)} e esse local é de ${labelFilial(filialDoPredio)}.`
+    );
+  }
 }
 
 export async function atribuirContagemPredio(
   input: AtribuirContagemPredioInput
 ): Promise<{ criados: number }> {
   const predios = await getPrediosDisponiveis(input.empresaCodigo);
-  const grupo = predios.find((p) => p.rua === input.rua && p.predio === input.predio);
+  const grupo = predios.find(
+    (p) =>
+      p.rua === input.rua &&
+      p.predio === input.predio &&
+      (input.filial === undefined || p.filial === (input.filial ?? null))
+  );
   if (!grupo) {
     throw new Error('Não há cópia de estoque registrada pra esse prédio.');
   }
+
+  await exigirFilialCompativel(input.atribuidoParaId, grupo.filial);
 
   const itensCopia = await getItensCopiaEstoquePorLocais(
     grupo.locais.map((l) => l.localCodigo),
@@ -270,6 +321,270 @@ export async function atribuirContagemPredio(
   );
 
   return { criados: novos.length };
+}
+
+// ---------------------------------------------------------------------------
+// Gestão da atribuição (repassar pra outro operador / remover)
+// ---------------------------------------------------------------------------
+
+// Itens que ainda não produziram nenhum número contado — os únicos que podem
+// ser repassados ou removidos sem jogar trabalho fora. Um item já conferido
+// (ou em 2ª contagem) fica onde está, com quem contou.
+const STATUS_SEM_CONTAGEM: StatusContagemItem[] = ['PENDENTE', 'EM_ANDAMENTO'];
+
+export interface AlvoAtribuicaoPredio {
+  rua: string | null;
+  predio: string | null;
+  empresaCodigo: string;
+  filial?: string | null;
+  // Opcional: restringe a ação aos itens de UM colaborador só (um prédio
+  // pode estar dividido entre mais de uma pessoa).
+  deUsuarioId?: string | null;
+}
+
+function whereDoPredio(alvo: AlvoAtribuicaoPredio) {
+  return {
+    empresaCodigo: alvo.empresaCodigo,
+    rua: alvo.rua,
+    predio: alvo.predio,
+    status: { in: STATUS_SEM_CONTAGEM },
+    ...(ehFilial(alvo.filial) ? { localCodigo: { startsWith: prefixoDaFilial(alvo.filial) } } : {}),
+    ...(alvo.deUsuarioId ? { atribuidoParaId: alvo.deUsuarioId } : {}),
+  };
+}
+
+function rotuloPredio(rua: string | null, predio: string | null): string {
+  if (!rua && !predio) return 'Outros locais';
+  return `Rua ${rua ?? '?'}${predio ? ` Prédio ${predio}` : ''}`;
+}
+
+export interface ReatribuirContagemPredioInput extends AlvoAtribuicaoPredio {
+  paraUsuarioId: string;
+  reatribuidoPorId: string;
+}
+
+// Tira a contagem de quem está com ela e entrega pra outro operador na mesma
+// hora. Os itens voltam pra PENDENTE (mesmo os que já tinham sido bipados),
+// porque quem assume precisa ir até a prateleira e bipar por conta própria —
+// o bipe é a prova de presença física, não pode ser herdado.
+export async function reatribuirContagemPredio(
+  input: ReatribuirContagemPredioInput
+): Promise<{ movidos: number }> {
+  const itens = await prisma.contagemItem.findMany({
+    where: whereDoPredio(input),
+    select: { id: true, atribuidoParaId: true, localCodigo: true },
+  });
+
+  if (itens.length === 0) {
+    throw new Error('Não há itens em aberto pra repassar nesse prédio.');
+  }
+
+  await exigirFilialCompativel(input.paraUsuarioId, filialDoLocal(itens[0].localCodigo));
+
+  await prisma.contagemItem.updateMany({
+    where: { id: { in: itens.map((i) => i.id) } },
+    data: {
+      atribuidoParaId: input.paraUsuarioId,
+      atribuidoPorId: input.reatribuidoPorId,
+      atribuidoEm: new Date(),
+      status: 'PENDENTE',
+      iniciadoPorId: null,
+      iniciadoEm: null,
+      codigoProdutoBipado: null,
+      codigoLocalBipado: null,
+    },
+  });
+
+  const rotulo = rotuloPredio(input.rua, input.predio);
+  const nomeAdmin = await nomeUsuario(input.reatribuidoPorId);
+  const nomeNovo = await nomeUsuario(input.paraUsuarioId);
+  const chave = `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`;
+
+  await notificarUsuario(
+    'ATRIBUICAO_CONTAGEM',
+    chave,
+    'Contagem repassada pra você',
+    `${nomeAdmin} passou ${rotulo} pra você contar (${itens.length} ite${itens.length === 1 ? 'm' : 'ns'}).`,
+    input.paraUsuarioId
+  );
+
+  const anteriores = new Set(
+    itens
+      .map((i) => i.atribuidoParaId)
+      .filter((id): id is string => Boolean(id) && id !== input.paraUsuarioId)
+  );
+  for (const anteriorId of anteriores) {
+    await notificarUsuario(
+      'ATRIBUICAO_CONTAGEM',
+      chave,
+      'Contagem repassada',
+      `${nomeAdmin} passou ${rotulo} pra ${nomeNovo}. Você não precisa mais contar esse prédio.`,
+      anteriorId
+    );
+  }
+
+  return { movidos: itens.length };
+}
+
+export interface RemoverAtribuicaoPredioInput extends AlvoAtribuicaoPredio {
+  removidoPorId: string;
+}
+
+// Remove a atribuição: apaga os itens que ninguém contou ainda (eles são
+// recriados iguaizinhos a partir da cópia de estoque numa próxima
+// atribuição). O que já foi contado continua registrado — `mantidos` diz
+// quantos ficaram.
+export async function removerAtribuicaoPredio(
+  input: RemoverAtribuicaoPredioInput
+): Promise<{ removidos: number; mantidos: number }> {
+  const itens = await prisma.contagemItem.findMany({
+    where: whereDoPredio(input),
+    select: { id: true, atribuidoParaId: true },
+  });
+
+  const mantidos = await prisma.contagemItem.count({
+    where: {
+      empresaCodigo: input.empresaCodigo,
+      rua: input.rua,
+      predio: input.predio,
+      status: { notIn: STATUS_SEM_CONTAGEM },
+      ...(input.deUsuarioId ? { atribuidoParaId: input.deUsuarioId } : {}),
+    },
+  });
+
+  if (itens.length === 0) {
+    throw new Error('Não há itens em aberto pra remover nesse prédio.');
+  }
+
+  await prisma.contagemItem.deleteMany({ where: { id: { in: itens.map((i) => i.id) } } });
+
+  const rotulo = rotuloPredio(input.rua, input.predio);
+  const nomeAdmin = await nomeUsuario(input.removidoPorId);
+  const chave = `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`;
+  const anteriores = new Set(itens.map((i) => i.atribuidoParaId).filter((id): id is string => Boolean(id)));
+  for (const anteriorId of anteriores) {
+    await notificarUsuario(
+      'ATRIBUICAO_CONTAGEM',
+      chave,
+      'Contagem cancelada',
+      `${nomeAdmin} removeu ${rotulo} da sua lista de contagem.`,
+      anteriorId
+    );
+  }
+
+  return { removidos: itens.length, mantidos };
+}
+
+// ---------------------------------------------------------------------------
+// Item fora do lugar (produto intruso na prateleira que está sendo contada)
+// ---------------------------------------------------------------------------
+
+export async function buscarProdutos(termo: string): Promise<ProdutoBuscaSankhya[]> {
+  return buscarProdutosSankhya(termo);
+}
+
+export interface RegistrarItemForaDoLugarInput {
+  usuarioId: string;
+  codigoProduto: string;
+  codigoLocalBipado: string;
+  codigoProdutoBipado: string;
+}
+
+// O filtro por loja não pode engessar a operação: é comum achar produto
+// guardado no lugar errado. Aqui o colaborador registra o que encontrou na
+// prateleira em que ele está — o item entra na contagem dele na hora, e se o
+// ERP esperava aquele produto em outro endereço ele nasce marcado como
+// divergência de local, pro admin resolver o endereçamento/etiqueta.
+export async function registrarItemForaDoLugar(
+  input: RegistrarItemForaDoLugarInput
+): Promise<ContagemItemDTO> {
+  const usuario = await prisma.usuario.findUnique({ where: { id: input.usuarioId } });
+  if (!usuario) throw new Error('Usuário não encontrado.');
+
+  if (!localVisivelPara(input.codigoLocalBipado, usuario.filial)) {
+    throw new Error(
+      `O local ${input.codigoLocalBipado} não é da loja ${labelFilial(usuario.filial)} — confira a etiqueta.`
+    );
+  }
+
+  const base = await getItemCopiaEstoque(input.codigoProduto, input.codigoLocalBipado);
+  if (!base) {
+    throw new Error('Não achei esse produto ou esse local no Sankhya. Confira os códigos.');
+  }
+
+  const jaExiste = await prisma.contagemItem.findFirst({
+    where: {
+      codigoProduto: base.codigoProduto,
+      localCodigo: base.localCodigo,
+      empresaCodigo: base.empresaCodigo,
+      status: { in: STATUS_ABERTOS },
+    },
+  });
+  if (jaExiste) {
+    if (jaExiste.atribuidoParaId !== input.usuarioId) {
+      const dono = await nomeUsuario(jaExiste.atribuidoParaId ?? '');
+      throw new Error(`Esse produto já está na contagem de ${dono} nesse mesmo local.`);
+    }
+    return montarContagemItemDTO(jaExiste);
+  }
+
+  const locaisEsperados = await getLocaisEsperadosDoProduto(base.codigoProduto, base.empresaCodigo);
+  const esperadoAqui =
+    base.quantidadeEsperada > 0 || locaisEsperados.some((l) => l.localCodigo === base.localCodigo);
+  const outrosLocais = locaisEsperados.filter((l) => l.localCodigo !== base.localCodigo);
+  const divergenciaLocal = !esperadoAqui;
+  const localEsperado = outrosLocais.length > 0 ? outrosLocais.map((l) => l.local).join(' | ') : null;
+
+  const { rua, predio } = parsearLocalizacao(base.local);
+
+  const criado = await prisma.contagemItem.create({
+    data: {
+      empresaCodigo: base.empresaCodigo,
+      empresaNome: base.empresaNome,
+      codigoProduto: base.codigoProduto,
+      descricao: base.descricao,
+      unidade: base.unidade,
+      local: base.local,
+      localCodigo: base.localCodigo,
+      quantidadeEsperada: base.quantidadeEsperada,
+      dataCopiaEstoque: base.dataCopiaEstoque ? new Date(base.dataCopiaEstoque) : null,
+      rua,
+      predio,
+      divergenciaLocal,
+      localEsperado,
+      // Já nasce em andamento: o colaborador está com o item na mão e acabou
+      // de bipar o local, então segue direto pra digitar a quantidade.
+      status: 'EM_ANDAMENTO',
+      atribuidoParaId: input.usuarioId,
+      atribuidoPorId: input.usuarioId,
+      iniciadoPorId: input.usuarioId,
+      iniciadoEm: new Date(),
+      codigoProdutoBipado: input.codigoProdutoBipado,
+      codigoLocalBipado: input.codigoLocalBipado,
+    },
+  });
+
+  const nome = await nomeUsuario(input.usuarioId);
+  if (divergenciaLocal) {
+    await criarNotificacao(
+      'DIVERGENCIA_LOCAL',
+      criado.id,
+      'Divergência de local',
+      `${nome} achou ${base.descricao} em ${base.local}` +
+        (localEsperado
+          ? `, mas o sistema esperava em ${localEsperado}.`
+          : ', local que o sistema não tinha registrado.')
+    );
+  } else {
+    await criarNotificacao(
+      'INICIO_CONTAGEM',
+      criado.id,
+      'Contagem iniciada',
+      `${nome} começou a contar ${base.descricao} (${base.local}) — item que não estava na lista dele.`
+    );
+  }
+
+  return montarContagemItemDTO(criado);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +688,9 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
   const itens = await prisma.contagemItem.findMany({
     where: {
       ...(filtro?.status ? { status: filtro.status } : {}),
+      ...(ehFilial(filtro?.filial)
+        ? { localCodigo: { startsWith: prefixoDaFilial(filtro.filial) } }
+        : {}),
       ...(filtro?.dataInicio || filtro?.dataFim
         ? {
             iniciadoEm: {
@@ -392,13 +710,15 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
 export async function getDivergenciasContagem(filtro?: {
   dataInicio?: Date;
   dataFim?: Date;
+  filial?: string | null;
 }): Promise<ContagemItemDTO[]> {
-  const [divergentes, aguardando, segundaEmAndamento] = await Promise.all([
+  const [divergentes, divergenciasDeLocal, aguardando, segundaEmAndamento] = await Promise.all([
     getContagemItens({ ...filtro, status: 'DIVERGENCIA' }),
+    getContagemItens({ ...filtro, status: 'DIVERGENCIA_LOCAL' }),
     getContagemItens({ ...filtro, status: 'AGUARDANDO_SEGUNDA_CONTAGEM' }),
     getContagemItens({ ...filtro, status: 'SEGUNDA_EM_ANDAMENTO' }),
   ]);
-  return [...divergentes, ...aguardando, ...segundaEmAndamento];
+  return [...divergentes, ...divergenciasDeLocal, ...aguardando, ...segundaEmAndamento];
 }
 
 export async function getContagemItem(id: string): Promise<ContagemItemDTO | null> {
@@ -418,7 +738,12 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
   }
 
   const diferenca = input.quantidadeConferida - item.quantidadeEsperada;
-  if (diferenca !== 0 && !input.motivo) {
+  // Item fora do lugar quase sempre diverge (o sistema esperava 0 ali), e o
+  // motivo já é conhecido — não faz sentido cobrar do colaborador.
+  const motivo = item.divergenciaLocal
+    ? (input.motivo ?? 'Item encontrado em local diferente do sistema')
+    : input.motivo;
+  if (diferenca !== 0 && !motivo) {
     throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
   }
 
@@ -427,7 +752,11 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     fotoChave = await uploadFotoContagem(item.id, numeroContagem, input.foto.buffer, input.foto.mimeType);
   }
 
-  const novoStatus: StatusContagemItem = diferenca === 0 ? 'CONFERIDA' : 'DIVERGENCIA';
+  const novoStatus: StatusContagemItem = item.divergenciaLocal
+    ? 'DIVERGENCIA_LOCAL'
+    : diferenca === 0
+      ? 'CONFERIDA'
+      : 'DIVERGENCIA';
 
   await prisma.contagemItem.update({
     where: { id: item.id },
@@ -436,7 +765,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
         ? {
             quantidadeConferida: input.quantidadeConferida,
             diferenca,
-            motivo: diferenca !== 0 ? input.motivo : null,
+            motivo: diferenca !== 0 ? motivo : null,
             observacao: input.observacao ?? null,
             conferidoPorId: input.conferidoPorId,
             dataConferencia: new Date(),
@@ -446,7 +775,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
         : {
             quantidadeConferida2: input.quantidadeConferida,
             diferenca2: diferenca,
-            motivo2: diferenca !== 0 ? input.motivo : null,
+            motivo2: diferenca !== 0 ? motivo : null,
             observacao2: input.observacao ?? null,
             conferidoPor2Id: input.conferidoPorId,
             dataConferencia2: new Date(),
@@ -458,7 +787,15 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
 
   const nome = await nomeUsuario(input.conferidoPorId);
   const rotulo = numeroContagem === 1 ? '' : ' (2ª contagem)';
-  if (diferenca === 0) {
+  if (item.divergenciaLocal) {
+    await criarNotificacao(
+      'DIVERGENCIA_LOCAL',
+      item.id,
+      'Divergência de local',
+      `${nome} contou ${input.quantidadeConferida} de ${item.descricao} em ${item.local}` +
+        (item.localEsperado ? `, mas o sistema esperava esse produto em ${item.localEsperado}.` : '.')
+    );
+  } else if (diferenca === 0) {
     await criarNotificacao(
       'FIM_CONTAGEM',
       item.id,
@@ -516,12 +853,17 @@ export interface IndicadoresContagemDTO {
   emAndamento: number;
   conferidos: number;
   comDivergencia: number;
+  divergenciaLocal: number;
   aguardandoSegundaContagem: number;
   segundaEmAndamento: number;
 }
 
-export async function getIndicadoresContagem(): Promise<IndicadoresContagemDTO> {
-  const grupos = await prisma.contagemItem.groupBy({ by: ['status'], _count: { _all: true } });
+export async function getIndicadoresContagem(filial?: string | null): Promise<IndicadoresContagemDTO> {
+  const grupos = await prisma.contagemItem.groupBy({
+    by: ['status'],
+    _count: { _all: true },
+    where: ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {},
+  });
   const mapa = Object.fromEntries(grupos.map((g) => [g.status, g._count._all]));
 
   return {
@@ -529,6 +871,7 @@ export async function getIndicadoresContagem(): Promise<IndicadoresContagemDTO> 
     emAndamento: mapa.EM_ANDAMENTO ?? 0,
     conferidos: mapa.CONFERIDA ?? 0,
     comDivergencia: mapa.DIVERGENCIA ?? 0,
+    divergenciaLocal: mapa.DIVERGENCIA_LOCAL ?? 0,
     aguardandoSegundaContagem: mapa.AGUARDANDO_SEGUNDA_CONTAGEM ?? 0,
     segundaEmAndamento: mapa.SEGUNDA_EM_ANDAMENTO ?? 0,
   };
@@ -547,6 +890,7 @@ export interface ProgressoPredioColaborador {
 export interface ProgressoPredio {
   rua: string | null;
   predio: string | null;
+  filial: Filial | null;
   empresaCodigo: string;
   empresaNome: string;
   total: number;
@@ -554,14 +898,17 @@ export interface ProgressoPredio {
   emAndamento: number;
   conferido: number;
   divergente: number;
+  divergenciaLocal: number;
   colaboradores: ProgressoPredioColaborador[];
 }
 
-export async function getProgressoContagemPorPredio(): Promise<ProgressoPredio[]> {
+export async function getProgressoContagemPorPredio(filial?: string | null): Promise<ProgressoPredio[]> {
   const itens = await prisma.contagemItem.findMany({
+    where: ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {},
     select: {
       rua: true,
       predio: true,
+      localCodigo: true,
       empresaCodigo: true,
       empresaNome: true,
       status: true,
@@ -582,6 +929,7 @@ export async function getProgressoContagemPorPredio(): Promise<ProgressoPredio[]
       grupo = {
         rua: item.rua,
         predio: item.predio,
+        filial: filialDoLocal(item.localCodigo),
         empresaCodigo: item.empresaCodigo,
         empresaNome: item.empresaNome,
         total: 0,
@@ -589,6 +937,7 @@ export async function getProgressoContagemPorPredio(): Promise<ProgressoPredio[]
         emAndamento: 0,
         conferido: 0,
         divergente: 0,
+        divergenciaLocal: 0,
         colaboradores: [],
       };
       grupos.set(chave, grupo);
@@ -599,6 +948,7 @@ export async function getProgressoContagemPorPredio(): Promise<ProgressoPredio[]
     if (item.status === 'EM_ANDAMENTO' || item.status === 'SEGUNDA_EM_ANDAMENTO') grupo.emAndamento += 1;
     if (item.status === 'CONFERIDA') grupo.conferido += 1;
     if (item.status === 'DIVERGENCIA' || item.status === 'AGUARDANDO_SEGUNDA_CONTAGEM') grupo.divergente += 1;
+    if (item.status === 'DIVERGENCIA_LOCAL') grupo.divergenciaLocal += 1;
 
     const responsavel =
       item.segundaContagemSolicitada && item.quantidadeConferida2 === null

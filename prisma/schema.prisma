@@ -22,6 +22,9 @@ model Usuario {
   login     String       @unique
   senhaHash String
   role      PapelUsuario
+  // Loja do usuário (ver src/lib/filiais.ts). Só enxerga locais cujo CODLOCAL
+  // começa com o prefixo da própria filial; null = vê todas as lojas.
+  filial    String?
   criadoEm  DateTime     @default(now())
 
   atribuicoes   MovimentacaoAtribuicao[]
@@ -265,6 +268,13 @@ model ContagemItem {
   // Null quando o local não bate com o padrão rua/prédio reconhecido.
   rua    String?
   predio String?
+
+  // Item encontrado fisicamente num local diferente do que o ERP esperava
+  // (o colaborador achou um "intruso" na prateleira que estava contando).
+  // localEsperado guarda onde o Sankhya dizia que ele deveria estar, pra o
+  // admin conseguir tomar providência sobre a etiqueta/endereçamento.
+  divergenciaLocal Boolean @default(false)
+  localEsperado    String?
 
   // status "PENDENTE" = atribuído pelo admin, ainda não bipado pelo colaborador.
   status        String   @default("PENDENTE")

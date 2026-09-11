@@ -17,6 +17,7 @@ export const TIPOS_NOTIFICACAO: { tipo: string; label: string }[] = [
   { tipo: 'INICIO_CONTAGEM', label: 'Início de contagem' },
   { tipo: 'FIM_CONTAGEM', label: 'Fim de contagem (bateu certo)' },
   { tipo: 'DIVERGENCIA_CONTAGEM', label: 'Divergência na contagem' },
+  { tipo: 'DIVERGENCIA_LOCAL', label: 'Divergência de local (item fora do lugar)' },
   { tipo: 'INICIO_SEGUNDA_CONTAGEM', label: 'Início de recontagem' },
   { tipo: 'PRODUTO_NEGATIVADO', label: 'Produto com estoque negativo' },
 ];

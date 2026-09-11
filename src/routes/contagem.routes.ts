@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
 
+import { prisma } from '../lib/prisma';
 import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as contagemService from '../services/contagem.service';
 import { StatusContagemItem } from '../services/contagem.service';
@@ -11,22 +12,53 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 export const contagemRouter = Router();
 export const contagemItensRouter = Router();
 
-contagemRouter.get('/indicadores', autenticar, exigirAdmin, async (_req, res) => {
-  res.json(await contagemService.getIndicadoresContagem());
+// A loja de quem está pedindo decide o que ele enxerga (os locais das outras
+// lojas somem da interface). Vem do banco, não do token: o token antigo dos
+// aparelhos já instalados não tem esse campo, e trocar todo mundo de token só
+// por causa disso não compensa.
+async function filialDoRequisitante(usuarioId?: string): Promise<string | null> {
+  if (!usuarioId) return null;
+  const usuario = await prisma.usuario.findUnique({
+    where: { id: usuarioId },
+    select: { filial: true },
+  });
+  return usuario?.filial ?? null;
+}
+
+contagemRouter.get('/indicadores', autenticar, exigirAdmin, async (req, res) => {
+  const filial = await filialDoRequisitante(req.usuario?.sub);
+  res.json(await contagemService.getIndicadoresContagem(filial));
 });
 
-contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (_req, res) => {
-  res.json(await contagemService.getProgressoContagemPorPredio());
+contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (req, res) => {
+  const filial = await filialDoRequisitante(req.usuario?.sub);
+  res.json(await contagemService.getProgressoContagemPorPredio(filial));
 });
 
 contagemRouter.get('/locais', autenticar, exigirAdmin, async (req, res) => {
   const { empresa } = req.query;
-  res.json(await contagemService.getPrediosDisponiveis(typeof empresa === 'string' ? empresa : undefined));
+  const filial = await filialDoRequisitante(req.usuario?.sub);
+  res.json(
+    await contagemService.getPrediosDisponiveis(typeof empresa === 'string' ? empresa : undefined, filial)
+  );
+});
+
+// Busca de produto por código/descrição — o colaborador usa pra dizer QUAL
+// produto ele achou fora do lugar (o código de barras da embalagem é do
+// fabricante, não resolve o produto no Sankhya).
+contagemRouter.get('/produtos', autenticar, async (req, res) => {
+  const { busca } = req.query;
+  if (typeof busca !== 'string' || busca.trim().length < 2) {
+    res.json([]);
+    return;
+  }
+  res.json(await contagemService.buscarProdutos(busca));
 });
 
 const atribuirContagemSchema = z.object({
   rua: z.string().nullable(),
   predio: z.string().nullable(),
+  filial: z.string().nullable().optional(),
   empresaCodigo: z.string().min(1),
   atribuidoParaId: z.string().min(1),
 });
@@ -51,6 +83,65 @@ contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
   }
 });
 
+const reatribuirContagemSchema = z.object({
+  rua: z.string().nullable(),
+  predio: z.string().nullable(),
+  filial: z.string().nullable().optional(),
+  empresaCodigo: z.string().min(1),
+  // Opcional: repassa só os itens que estão com essa pessoa.
+  deUsuarioId: z.string().nullable().optional(),
+  paraUsuarioId: z.string().min(1),
+});
+
+// Tira a contagem de um operador e entrega pra outro na mesma ação.
+contagemRouter.post('/reatribuir', autenticar, exigirAdmin, async (req, res) => {
+  const parse = reatribuirContagemSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const resultado = await contagemService.reatribuirContagemPredio({
+      ...parse.data,
+      reatribuidoPorId: req.usuario!.sub,
+    });
+    res.json(resultado);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível repassar a contagem.' });
+  }
+});
+
+const removerAtribuicaoSchema = z.object({
+  rua: z.string().nullable(),
+  predio: z.string().nullable(),
+  filial: z.string().nullable().optional(),
+  empresaCodigo: z.string().min(1),
+  deUsuarioId: z.string().nullable().optional(),
+});
+
+contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, res) => {
+  const parse = removerAtribuicaoSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const resultado = await contagemService.removerAtribuicaoPredio({
+      ...parse.data,
+      removidoPorId: req.usuario!.sub,
+    });
+    res.json(resultado);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível remover a atribuição.' });
+  }
+});
+
 // ---- Itens de contagem (/contagem-itens) -------------------------------
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
@@ -61,6 +152,7 @@ contagemItensRouter.get('/', autenticar, async (req, res) => {
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
     dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
     dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+    filial: await filialDoRequisitante(req.usuario?.sub),
   });
   res.json(itens);
 });
@@ -72,8 +164,38 @@ contagemItensRouter.get('/divergencias', autenticar, exigirAdmin, async (req, re
     await contagemService.getDivergenciasContagem({
       dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
       dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+      filial: await filialDoRequisitante(req.usuario?.sub),
     })
   );
+});
+
+const itemForaDoLugarSchema = z.object({
+  codigoProduto: z.string().min(1),
+  codigoProdutoBipado: z.string().min(1),
+  codigoLocalBipado: z.string().min(1),
+});
+
+// Produto achado numa prateleira que não é a dele: entra na contagem de quem
+// achou e, se o ERP esperava o produto em outro endereço, já nasce marcado
+// como divergência de local pro admin.
+contagemItensRouter.post('/fora-do-lugar', autenticar, async (req, res) => {
+  const parse = itemForaDoLugarSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const item = await contagemService.registrarItemForaDoLugar({
+      ...parse.data,
+      usuarioId: req.usuario!.sub,
+    });
+    res.status(201).json(item);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível registrar o item.' });
+  }
 });
 
 const iniciarContagemItemSchema = z.object({
