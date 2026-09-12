@@ -18,6 +18,8 @@ export const FILIAIS: { valor: Filial; label: string; prefixo: string }[] = [
   { valor: 'JANAUBA', label: 'Janaúba', prefixo: '8' },
 ];
 
+export const PREFIXOS_DE_LOJA = FILIAIS.map((f) => f.prefixo);
+
 export function ehFilial(valor: string | null | undefined): valor is Filial {
   return FILIAIS.some((f) => f.valor === valor);
 }
@@ -37,6 +39,16 @@ export function filialDoLocal(localCodigo: string | null | undefined): Filial | 
   if (!localCodigo) return null;
   const primeiroDigito = localCodigo.trim()[0];
   return FILIAIS.find((f) => f.prefixo === primeiroDigito)?.valor ?? null;
+}
+
+// O endereçamento ANTIGO do estoque (A.A-R.1-L.B-P.1-N.1-CESTO.13,
+// "RUA 1 LADO A BLOCO 6", "SEM LOCAL LAPA"...) vive nos prefixos que não são
+// de nenhuma loja — tipicamente 1 e 6. Como o parser de rua/prédio também
+// reconhece esses nomes, sem esse corte um prédio novo ("RUA 1 PRÉDIO 1",
+// local 201001) vinha misturado com dezenas de prateleiras antigas no mesmo
+// agrupamento. A contagem trabalha só com o endereçamento atual.
+export function ehLocalDeLoja(localCodigo: string | null | undefined): boolean {
+  return filialDoLocal(localCodigo) !== null;
 }
 
 // Um local pertence à visão do usuário quando ele não tem filial (vê tudo)

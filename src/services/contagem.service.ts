@@ -9,7 +9,16 @@ import {
   ProdutoBuscaSankhya,
 } from '../sankhya/client';
 import { chavePredio, parsearLocalizacao } from '../sankhya/localizacao';
-import { ehFilial, Filial, filialDoLocal, labelFilial, localVisivelPara, prefixoDaFilial } from '../lib/filiais';
+import {
+  ehFilial,
+  ehLocalDeLoja,
+  Filial,
+  filialDoLocal,
+  labelFilial,
+  localVisivelPara,
+  prefixoDaFilial,
+  PREFIXOS_DE_LOJA,
+} from '../lib/filiais';
 import { criarNotificacao, notificarUsuario } from './notificacao.service';
 
 // DIVERGENCIA_LOCAL = o produto foi contado numa prateleira diferente da que
@@ -191,15 +200,20 @@ export interface PredioDisponivel {
 // Agrupa os locais que têm cópia de estoque (TGFCTE) por rua/prédio — é essa
 // lista que o admin navega pra escolher o que atribuir. Locais sem rua/prédio
 // reconhecível caem num grupo { rua: null, predio: null } ("Outros locais").
-// `filial` esconde os locais das outras lojas (prefixo do CODLOCAL): quem
-// tem loja definida nunca enxerga prateleira de outra filial, nem pra
-// atribuir.
+// Duas peneiras antes de agrupar:
+//   1. endereçamento antigo fica de fora (ver ehLocalDeLoja) — senão um
+//      prédio novo vem inflado com dezenas de prateleiras velhas que têm
+//      "R.1"/"P.1" no nome;
+//   2. `filial` esconde os locais das outras lojas, pra quem tem loja
+//      definida no cadastro.
 export async function getPrediosDisponiveis(
   empresa?: string,
   filial?: string | null
 ): Promise<PredioDisponivel[]> {
   const todosOsLocais = await getLocaisComCopiaEstoque(empresa);
-  const locais = todosOsLocais.filter((l) => localVisivelPara(l.localCodigo, filial));
+  const locais = todosOsLocais.filter(
+    (l) => ehLocalDeLoja(l.localCodigo) && localVisivelPara(l.localCodigo, filial)
+  );
   const grupos = new Map<string, PredioDisponivel>();
 
   for (const local of locais) {
@@ -337,9 +351,25 @@ export interface AlvoAtribuicaoPredio {
   predio: string | null;
   empresaCodigo: string;
   filial?: string | null;
+  // Só os locais FORA do endereçamento atual. Sem isso, remover "Rua 1
+  // Prédio 6" levaria junto o prédio novo de mesmo nome, já que rua/prédio
+  // sozinhos não distinguem os dois endereçamentos.
+  somenteLegado?: boolean;
   // Opcional: restringe a ação aos itens de UM colaborador só (um prédio
   // pode estar dividido entre mais de uma pessoa).
   deUsuarioId?: string | null;
+}
+
+// Recorte de local comum a todas as ações de prédio: por loja, ou só o que
+// está fora do endereçamento atual.
+function filtroDeLocal(alvo: AlvoAtribuicaoPredio) {
+  if (alvo.somenteLegado) {
+    return { NOT: { OR: PREFIXOS_DE_LOJA.map((prefixo) => ({ localCodigo: { startsWith: prefixo } })) } };
+  }
+  if (ehFilial(alvo.filial)) {
+    return { localCodigo: { startsWith: prefixoDaFilial(alvo.filial) } };
+  }
+  return {};
 }
 
 function whereDoPredio(alvo: AlvoAtribuicaoPredio) {
@@ -348,7 +378,7 @@ function whereDoPredio(alvo: AlvoAtribuicaoPredio) {
     rua: alvo.rua,
     predio: alvo.predio,
     status: { in: STATUS_SEM_CONTAGEM },
-    ...(ehFilial(alvo.filial) ? { localCodigo: { startsWith: prefixoDaFilial(alvo.filial) } } : {}),
+    ...filtroDeLocal(alvo),
     ...(alvo.deUsuarioId ? { atribuidoParaId: alvo.deUsuarioId } : {}),
   };
 }
@@ -428,32 +458,42 @@ export async function reatribuirContagemPredio(
 
 export interface RemoverAtribuicaoPredioInput extends AlvoAtribuicaoPredio {
   removidoPorId: string;
+  // true = limpeza total do prédio, incluindo o que já foi contado (a
+  // contagem e a foto somem junto, sem volta). false/ausente = só tira da
+  // lista o que ninguém contou.
+  incluirContados?: boolean;
 }
 
-// Remove a atribuição: apaga os itens que ninguém contou ainda (eles são
-// recriados iguaizinhos a partir da cópia de estoque numa próxima
-// atribuição). O que já foi contado continua registrado — `mantidos` diz
-// quantos ficaram.
+// Remove a atribuição. O que ninguém contou é apagado (e é recriado
+// igualzinho a partir da cópia de estoque numa próxima atribuição). O que já
+// foi contado só sai com `incluirContados` — senão fica registrado, e
+// `mantidos` diz quantos ficaram.
 export async function removerAtribuicaoPredio(
   input: RemoverAtribuicaoPredioInput
 ): Promise<{ removidos: number; mantidos: number }> {
-  const itens = await prisma.contagemItem.findMany({
+  const emAberto = await prisma.contagemItem.findMany({
     where: whereDoPredio(input),
     select: { id: true, atribuidoParaId: true },
   });
 
-  const mantidos = await prisma.contagemItem.count({
-    where: {
-      empresaCodigo: input.empresaCodigo,
-      rua: input.rua,
-      predio: input.predio,
-      status: { notIn: STATUS_SEM_CONTAGEM },
-      ...(input.deUsuarioId ? { atribuidoParaId: input.deUsuarioId } : {}),
-    },
-  });
+  const whereContados = {
+    empresaCodigo: input.empresaCodigo,
+    rua: input.rua,
+    predio: input.predio,
+    status: { notIn: STATUS_SEM_CONTAGEM },
+    ...filtroDeLocal(input),
+    ...(input.deUsuarioId ? { atribuidoParaId: input.deUsuarioId } : {}),
+  };
+  const contados = input.incluirContados
+    ? await prisma.contagemItem.findMany({ where: whereContados, select: { id: true, atribuidoParaId: true } })
+    : [];
+  const mantidos = input.incluirContados
+    ? 0
+    : await prisma.contagemItem.count({ where: whereContados });
 
+  const itens = [...emAberto, ...contados];
   if (itens.length === 0) {
-    throw new Error('Não há itens em aberto pra remover nesse prédio.');
+    throw new Error('Não há itens pra remover nesse prédio.');
   }
 
   await prisma.contagemItem.deleteMany({ where: { id: { in: itens.map((i) => i.id) } } });
@@ -467,7 +507,8 @@ export async function removerAtribuicaoPredio(
       'ATRIBUICAO_CONTAGEM',
       chave,
       'Contagem cancelada',
-      `${nomeAdmin} removeu ${rotulo} da sua lista de contagem.`,
+      `${nomeAdmin} removeu ${rotulo} da sua lista de contagem.` +
+        (input.incluirContados ? ' As contagens já registradas desse prédio foram apagadas.' : ''),
       anteriorId
     );
   }
@@ -923,7 +964,9 @@ export async function getProgressoContagemPorPredio(filial?: string | null): Pro
   const grupos = new Map<string, ProgressoPredio>();
 
   for (const item of itens) {
-    const chave = `${item.empresaCodigo}|${chavePredio(item.rua, item.predio)}`;
+    // A filial entra na chave pra não juntar num grupo só o prédio novo e as
+    // prateleiras antigas que têm o mesmo "R.1/P.6" no nome.
+    const chave = `${item.empresaCodigo}|${filialDoLocal(item.localCodigo) ?? '-'}|${chavePredio(item.rua, item.predio)}`;
     let grupo = grupos.get(chave);
     if (!grupo) {
       grupo = {
@@ -965,7 +1008,8 @@ export async function getProgressoContagemPorPredio(filial?: string | null): Pro
   // Segunda passada só pra montar a contagem de itens em aberto por colaborador.
   for (const [chave, grupo] of grupos) {
     const itensDoGrupo = itens.filter(
-      (i) => `${i.empresaCodigo}|${chavePredio(i.rua, i.predio)}` === chave
+      (i) =>
+        `${i.empresaCodigo}|${filialDoLocal(i.localCodigo) ?? '-'}|${chavePredio(i.rua, i.predio)}` === chave
     );
     const contagemPorUsuario = new Map<string, number>();
     for (const item of itensDoGrupo) {

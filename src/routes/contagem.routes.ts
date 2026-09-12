@@ -120,6 +120,10 @@ const removerAtribuicaoSchema = z.object({
   filial: z.string().nullable().optional(),
   empresaCodigo: z.string().min(1),
   deUsuarioId: z.string().nullable().optional(),
+  // Limpeza total: leva junto as contagens já registradas do prédio.
+  incluirContados: z.boolean().optional(),
+  // Só os locais fora do endereçamento atual (limpeza de atribuição órfã).
+  somenteLegado: z.boolean().optional(),
 });
 
 contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, res) => {
