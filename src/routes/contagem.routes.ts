@@ -58,6 +58,8 @@ contagemRouter.get('/produtos', autenticar, async (req, res) => {
 const atribuirContagemSchema = z.object({
   rua: z.string().nullable(),
   predio: z.string().nullable(),
+  // Ausente = prédio inteiro; string/null = só aquele nível.
+  nivel: z.string().nullable().optional(),
   filial: z.string().nullable().optional(),
   empresaCodigo: z.string().min(1),
   atribuidoParaId: z.string().min(1),

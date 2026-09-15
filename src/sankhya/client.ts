@@ -722,9 +722,36 @@ export interface LocalComCopiaEstoqueSankhya {
   totalItens: number;
 }
 
-// Base da contagem por prédio: todo local que teve uma cópia de estoque
-// (TGFCTE) gerada — sempre a última DTCONTAGEM por produto+local+empresa,
-// igual a mesma regra usada em getItemCopiaEstoque. Paginado (5000/página,
+// Recorte de "o que está na cópia de estoque" usado pela contagem por prédio.
+//
+// A cópia (TGFCTE) é gerada todo dia, mas só traz linha pra produto+local
+// que ainda TEM saldo. Quando o saldo zera, a combinação simplesmente some
+// das cópias seguintes — então pegar "a última DTCONTAGEM daquele
+// produto+local" ressuscita linhas velhas: o CODPROD 2207000 aparecia em RUA
+// 2 PRÉDIO 6 NÍVEL 1 por causa de uma cópia de 14/05, sem saldo nenhum hoje
+// (e 52.889 das 75.615 combinações estavam nessa situação). A referência
+// certa é a última cópia DO LOCAL: vale só o que está nela.
+//
+// Também fica de fora:
+//   - linha com QTDEST <= 0 (a cópia às vezes grava zerado/negativo);
+//   - área de quarentena — produto em quarentena não pode ser contado. Os três
+//     locais atuais ("ÁREA DE QUARENTENA", "AREA DE QUARENTENA LAPA", "JP
+//     QUARENTENA") têm prefixo de loja, então não caem no corte do
+//     endereçamento antigo e precisam ser barrados pelo nome.
+const SQL_ULTIMA_COPIA_POR_LOCAL = `
+  SELECT CODLOCAL, CODEMP, MAX(DTCONTAGEM) AS DTULTIMA
+  FROM TGFCTE
+  GROUP BY CODLOCAL, CODEMP
+`;
+
+export const FILTRO_SQL_SEM_QUARENTENA = `UPPER(NVL(LOC.DESCRLOCAL, ' ')) NOT LIKE '%QUARENTENA%'`;
+
+export function ehLocalDeQuarentena(descricaoLocal: string | null | undefined): boolean {
+  return (descricaoLocal ?? '').toUpperCase().includes('QUARENTENA');
+}
+
+// Base da contagem por prédio: todo local com saldo na última cópia de
+// estoque dele (ver SQL_ULTIMA_COPIA_POR_LOCAL). Paginado (5000/página,
 // limite do gateway).
 export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalComCopiaEstoqueSankhya[]> {
   const filtroEmpresa =
@@ -742,12 +769,12 @@ export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalC
         MAX(EMP.NOMEFANTASIA) AS "empresaNome",
         COUNT(DISTINCT CTE.CODPROD) AS "totalItens"
       FROM TGFCTE CTE
+      INNER JOIN (${SQL_ULTIMA_COPIA_POR_LOCAL}) ULT
+        ON ULT.CODLOCAL = CTE.CODLOCAL AND ULT.CODEMP = CTE.CODEMP AND ULT.DTULTIMA = CTE.DTCONTAGEM
       LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
       LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
-      WHERE CTE.DTCONTAGEM = (
-        SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
-        WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
-      )
+      WHERE CTE.QTDEST > 0
+        AND ${FILTRO_SQL_SEM_QUARENTENA}
       ${filtroEmpresa}
       GROUP BY CTE.CODLOCAL, CTE.CODEMP
       ORDER BY CTE.CODLOCAL
@@ -813,24 +840,27 @@ export async function getItensCopiaEstoquePorLocais(
     const sql = `
       SELECT
         CTE.CODPROD          AS "codigoProduto",
-        PRO.DESCRPROD        AS "descricao",
-        PRO.CODVOL           AS "unidade",
+        MAX(PRO.DESCRPROD)   AS "descricao",
+        MAX(PRO.CODVOL)      AS "unidade",
         CTE.CODLOCAL         AS "localCodigo",
-        COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL)) AS "local",
+        MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL))) AS "local",
         CTE.CODEMP           AS "empresaCodigo",
-        EMP.NOMEFANTASIA     AS "empresaNome",
-        CTE.QTDEST           AS "quantidadeEsperada",
-        TO_CHAR(CTE.DTCONTAGEM, 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
+        MAX(EMP.NOMEFANTASIA) AS "empresaNome",
+        -- A mesma cópia às vezes grava mais de uma linha pro mesmo
+        -- produto+local (visto em teste: -3 e 2 no mesmo dia) — soma.
+        SUM(CTE.QTDEST)      AS "quantidadeEsperada",
+        TO_CHAR(MAX(CTE.DTCONTAGEM), 'YYYY-MM-DD"T"HH24:MI:SS') AS "dataCopiaEstoque"
       FROM TGFCTE CTE
+      INNER JOIN (${SQL_ULTIMA_COPIA_POR_LOCAL}) ULT
+        ON ULT.CODLOCAL = CTE.CODLOCAL AND ULT.CODEMP = CTE.CODEMP AND ULT.DTULTIMA = CTE.DTCONTAGEM
       INNER JOIN TGFPRO PRO ON CTE.CODPROD = PRO.CODPROD
       LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
       LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
       WHERE CTE.CODLOCAL IN (${locaisValidos.join(', ')})
         AND CTE.CODEMP = ${empresaNum}
-        AND CTE.DTCONTAGEM = (
-          SELECT MAX(CTE2.DTCONTAGEM) FROM TGFCTE CTE2
-          WHERE CTE2.CODPROD = CTE.CODPROD AND CTE2.CODLOCAL = CTE.CODLOCAL AND CTE2.CODEMP = CTE.CODEMP
-        )
+        AND ${FILTRO_SQL_SEM_QUARENTENA}
+      GROUP BY CTE.CODPROD, CTE.CODLOCAL, CTE.CODEMP
+      HAVING SUM(CTE.QTDEST) > 0
       ORDER BY CTE.CODLOCAL, CTE.CODPROD
       OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY
     `;

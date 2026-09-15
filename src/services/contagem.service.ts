@@ -2,6 +2,7 @@ import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
   buscarProdutosSankhya,
+  ehLocalDeQuarentena,
   getItemCopiaEstoque,
   getItensCopiaEstoquePorLocais,
   getLocaisComCopiaEstoque,
@@ -55,6 +56,7 @@ export interface ContagemItemDTO {
   status: StatusContagemItem;
   rua: string | null;
   predio: string | null;
+  nivel: string | null;
   filial: Filial | null;
   divergenciaLocal: boolean;
   localEsperado?: string;
@@ -142,6 +144,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     status: item.status,
     rua: item.rua ?? null,
     predio: item.predio ?? null,
+    nivel: item.nivel ?? null,
     filial: filialDoLocal(item.localCodigo),
     divergenciaLocal: item.divergenciaLocal ?? false,
     localEsperado: item.localEsperado ?? undefined,
@@ -194,7 +197,9 @@ export interface PredioDisponivel {
   empresaNome: string;
   totalItens: number;
   totalLocais: number;
-  locais: { localCodigo: string; local: string }[];
+  locais: { localCodigo: string; local: string; nivel: string | null; totalItens: number }[];
+  // Resumo por nível, pra o admin poder atribuir só um nível do prédio.
+  niveis: { nivel: string | null; totalItens: number; totalLocais: number }[];
 }
 
 // Agrupa os locais que têm cópia de estoque (TGFCTE) por rua/prédio — é essa
@@ -231,12 +236,25 @@ export async function getPrediosDisponiveis(
         totalItens: 0,
         totalLocais: 0,
         locais: [],
+        niveis: [],
       };
       grupos.set(chave, grupo);
     }
     grupo.totalItens += local.totalItens;
     grupo.totalLocais += 1;
-    grupo.locais.push({ localCodigo: local.localCodigo, local: local.local });
+    const { nivel } = parsearLocalizacao(local.local);
+    grupo.locais.push({ localCodigo: local.localCodigo, local: local.local, nivel, totalItens: local.totalItens });
+    const resumoNivel = grupo.niveis.find((n) => n.nivel === nivel);
+    if (resumoNivel) {
+      resumoNivel.totalItens += local.totalItens;
+      resumoNivel.totalLocais += 1;
+    } else {
+      grupo.niveis.push({ nivel, totalItens: local.totalItens, totalLocais: 1 });
+    }
+  }
+
+  for (const grupo of grupos.values()) {
+    grupo.niveis.sort((a, b) => Number(a.nivel ?? 9999) - Number(b.nivel ?? 9999));
   }
 
   return Array.from(grupos.values()).sort((a, b) => {
@@ -254,6 +272,9 @@ export async function getPrediosDisponiveis(
 export interface AtribuirContagemPredioInput {
   rua: string | null;
   predio: string | null;
+  // Opcional: atribui só um nível do prédio. undefined = prédio inteiro;
+  // null = só os locais do prédio que não trazem nível no nome.
+  nivel?: string | null;
   filial?: string | null;
   empresaCodigo: string;
   atribuidoParaId: string;
@@ -289,8 +310,14 @@ export async function atribuirContagemPredio(
 
   await exigirFilialCompativel(input.atribuidoParaId, grupo.filial);
 
+  const locaisAlvo =
+    input.nivel === undefined ? grupo.locais : grupo.locais.filter((l) => l.nivel === input.nivel);
+  if (locaisAlvo.length === 0) {
+    throw new Error('Esse nível não tem itens na cópia de estoque.');
+  }
+
   const itensCopia = await getItensCopiaEstoquePorLocais(
-    grupo.locais.map((l) => l.localCodigo),
+    locaisAlvo.map((l) => l.localCodigo),
     input.empresaCodigo
   );
 
@@ -319,13 +346,16 @@ export async function atribuirContagemPredio(
       status: 'PENDENTE',
       rua: input.rua,
       predio: input.predio,
+      nivel: parsearLocalizacao(i.local).nivel,
       atribuidoParaId: input.atribuidoParaId,
       atribuidoPorId: input.atribuidoPorId,
     })),
   });
 
   const nomeAdmin = await nomeUsuario(input.atribuidoPorId);
-  const rotulo = `Rua ${input.rua ?? '?'} Prédio ${input.predio ?? '?'}`;
+  const rotulo =
+    `Rua ${input.rua ?? '?'} Prédio ${input.predio ?? '?'}` +
+    (input.nivel !== undefined ? ` Nível ${input.nivel ?? '?'}` : '');
   await notificarUsuario(
     'ATRIBUICAO_CONTAGEM',
     `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`,
@@ -552,6 +582,9 @@ export async function registrarItemForaDoLugar(
   if (!base) {
     throw new Error('Não achei esse produto ou esse local no Sankhya. Confira os códigos.');
   }
+  if (ehLocalDeQuarentena(base.local)) {
+    throw new Error(`${base.local} é área de quarentena — produto em quarentena não entra na contagem.`);
+  }
 
   const jaExiste = await prisma.contagemItem.findFirst({
     where: {
@@ -576,7 +609,7 @@ export async function registrarItemForaDoLugar(
   const divergenciaLocal = !esperadoAqui;
   const localEsperado = outrosLocais.length > 0 ? outrosLocais.map((l) => l.local).join(' | ') : null;
 
-  const { rua, predio } = parsearLocalizacao(base.local);
+  const { rua, predio, nivel } = parsearLocalizacao(base.local);
 
   const criado = await prisma.contagemItem.create({
     data: {
@@ -591,6 +624,7 @@ export async function registrarItemForaDoLugar(
       dataCopiaEstoque: base.dataCopiaEstoque ? new Date(base.dataCopiaEstoque) : null,
       rua,
       predio,
+      nivel,
       divergenciaLocal,
       localEsperado,
       // Já nasce em andamento: o colaborador está com o item na mão e acabou
@@ -648,6 +682,9 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
   }
   if (item.status !== 'PENDENTE' || item.atribuidoParaId !== input.usuarioId) {
     throw new Error('Esse item não está atribuído a você.');
+  }
+  if (ehLocalDeQuarentena(item.local)) {
+    throw new Error(`${item.local} é área de quarentena — produto em quarentena não entra na contagem.`);
   }
   if (input.codigoLocalBipado !== item.localCodigo) {
     throw new Error(

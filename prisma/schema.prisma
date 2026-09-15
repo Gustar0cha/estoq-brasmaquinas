@@ -268,6 +268,9 @@ model ContagemItem {
   // Null quando o local não bate com o padrão rua/prédio reconhecido.
   rua    String?
   predio String?
+  // Nível dentro do prédio ("NÍVEL 1", "N.2") — permite atribuir a contagem
+  // por nível em vez do prédio inteiro. Null quando o nome do local não traz.
+  nivel  String?
 
   // Item encontrado fisicamente num local diferente do que o ERP esperava
   // (o colaborador achou um "intruso" na prateleira que estava contando).

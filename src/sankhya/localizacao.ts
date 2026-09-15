@@ -1,18 +1,20 @@
-// Parsing de TGFLOC.DESCRLOCAL em rua/prédio, pra agrupar a contagem física
-// por prédio. A descrição não é padronizada no Sankhya — coexistem pelo
-// menos 3 esquemas (confirmados numa auditoria real, 2026-08-28):
+// Parsing de TGFLOC.DESCRLOCAL em rua/prédio/nível, pra agrupar a contagem
+// física por prédio (e, dentro dele, por nível). A descrição não é
+// padronizada no Sankhya — coexistem pelo menos 3 esquemas (confirmados numa
+// auditoria real, 2026-08-28):
 //   - Por extenso: "RUA 4 PRÉDIO 2 NÍVEL 2 CESTO 16", "RUA-3-NIVEL-1-PREDIO-1-CESTO-28"
 //   - Abreviado "A.A.": "A.A.R.3.L.A.P.4.N.2.AP.4", "A.A-R.4-L.B-P.4-N.1-G.I-02"
 //   - Compacto: "R4P2N1", "R 4 - P 4 - N 1 - C 10"
 // Confirmado com a equipe: o prefixo "A.A." é só outra forma de escrever a
 // mesma coisa (R=Rua, P=Prédio, N=Nível, L=Lado A/B) — os dois esquemas
 // contam igual pra agrupamento por prédio. Locais sem rua/prédio reconhecível
-// (mostruário, áreas de recebimento, etc) retornam null nos dois campos e
-// caem num agrupamento "Outros locais" na UI — nunca são descartados.
+// (mostruário, áreas de recebimento, etc) retornam null nos campos e caem num
+// agrupamento "Outros locais" na UI — nunca são descartados.
 
 export interface LocalizacaoParseada {
   rua: string | null;
   predio: string | null;
+  nivel: string | null;
 }
 
 // Extrai um número associado a uma palavra por extenso (ex: "RUA 4",
@@ -36,14 +38,15 @@ function extrairAbreviado(descricao: string, letra: string): string | null {
 }
 
 export function parsearLocalizacao(descricaoLocal: string | null | undefined): LocalizacaoParseada {
-  if (!descricaoLocal) return { rua: null, predio: null };
+  if (!descricaoLocal) return { rua: null, predio: null, nivel: null };
   const descricao = descricaoLocal.toUpperCase();
 
   const rua = extrairPorExtenso(descricao, 'RUA') ?? extrairAbreviado(descricao, 'R');
   const predio =
     extrairPorExtenso(descricao, 'PR[ÉE]DIO', 'BLOCO') ?? extrairAbreviado(descricao, 'P');
+  const nivel = extrairPorExtenso(descricao, 'N[ÍI]VEL') ?? extrairAbreviado(descricao, 'N');
 
-  return { rua, predio };
+  return { rua, predio, nivel };
 }
 
 // Chave de agrupamento estável pra uma rua+prédio (usada tanto pra montar a
