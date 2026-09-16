@@ -1010,6 +1010,136 @@ export async function getSaldosAtuaisPorItem(
   return saldos;
 }
 
+interface LinhaCustoSankhya {
+  codigoProduto: number;
+  empresaCodigo: number;
+  custoSemIcms: number;
+}
+
+// Custo sem ICMS (TGFCUS.CUSSEMICM) mais recente de cada produto+empresa.
+//
+// O TGFCUS guarda histórico (uma linha por DTATUAL), então a leitura pega a
+// linha mais recente de cada par — é o custo que vale hoje. Serve pro
+// dashboard converter quantidade em dinheiro, que é a linguagem da diretoria.
+export async function getCustosSemIcms(
+  pares: { codigoProduto: string; empresaCodigo: string }[]
+): Promise<Map<string, number>> {
+  const custos = new Map<string, number>();
+
+  const unicos = new Map<string, { produto: number; empresa: number }>();
+  for (const par of pares) {
+    const produto = Number(par.codigoProduto);
+    const empresa = Number(par.empresaCodigo);
+    if (!Number.isFinite(produto) || !Number.isFinite(empresa)) continue;
+    unicos.set(`${produto}|${empresa}`, { produto, empresa });
+  }
+
+  const lista = [...unicos.values()];
+  if (lista.length === 0) return custos;
+
+  const TAMANHO_LOTE = 500;
+  for (let inicio = 0; inicio < lista.length; inicio += TAMANHO_LOTE) {
+    const lote = lista.slice(inicio, inicio + TAMANHO_LOTE);
+    const tuplas = lote.map((par) => `(${par.produto}, ${par.empresa})`).join(', ');
+
+    const sql = `
+      SELECT "codigoProduto", "empresaCodigo", "custoSemIcms"
+      FROM (
+        SELECT
+          CUS.CODPROD   AS "codigoProduto",
+          CUS.CODEMP    AS "empresaCodigo",
+          CUS.CUSSEMICM AS "custoSemIcms",
+          ROW_NUMBER() OVER (
+            PARTITION BY CUS.CODPROD, CUS.CODEMP ORDER BY CUS.DTATUAL DESC
+          ) AS RN
+        FROM TGFCUS CUS
+        WHERE (CUS.CODPROD, CUS.CODEMP) IN (${tuplas})
+      )
+      WHERE RN = 1
+    `;
+
+    for (const linha of await executarQuery<LinhaCustoSankhya>(sql)) {
+      custos.set(
+        chaveCusto(String(linha.codigoProduto), String(linha.empresaCodigo)),
+        linha.custoSemIcms ?? 0
+      );
+    }
+
+    // Produto sem custo cadastrado naquela empresa: usa o custo mais recente
+    // dele em qualquer empresa. Um custo aproximado diz muito mais que um
+    // zero, que faria o valor do inventário parecer menor do que é.
+    const semCusto = lote.filter((par) => !custos.has(chaveCusto(String(par.produto), String(par.empresa))));
+    if (semCusto.length === 0) continue;
+
+    const produtosSemCusto = [...new Set(semCusto.map((par) => par.produto))];
+    const sqlQualquerEmpresa = `
+      SELECT "codigoProduto", "custoSemIcms"
+      FROM (
+        SELECT
+          CUS.CODPROD   AS "codigoProduto",
+          CUS.CUSSEMICM AS "custoSemIcms",
+          ROW_NUMBER() OVER (PARTITION BY CUS.CODPROD ORDER BY CUS.DTATUAL DESC) AS RN
+        FROM TGFCUS CUS
+        WHERE CUS.CODPROD IN (${produtosSemCusto.join(', ')})
+          AND CUS.CUSSEMICM > 0
+      )
+      WHERE RN = 1
+    `;
+
+    const porProduto = new Map<number, number>();
+    for (const linha of await executarQuery<LinhaCustoSankhya>(sqlQualquerEmpresa)) {
+      porProduto.set(Number(linha.codigoProduto), linha.custoSemIcms ?? 0);
+    }
+
+    for (const par of semCusto) {
+      const custo = porProduto.get(par.produto);
+      if (custo !== undefined) {
+        custos.set(chaveCusto(String(par.produto), String(par.empresa)), custo);
+      }
+    }
+  }
+
+  return custos;
+}
+
+export function chaveCusto(codigoProduto: string, empresaCodigo: string): string {
+  return `${Number(codigoProduto)}|${Number(empresaCodigo)}`;
+}
+
+interface LinhaGrupoSankhya {
+  codigoProduto: number;
+  grupo: string | null;
+}
+
+// Grupo de cada produto (TGFPRO.CODGRUPOPROD -> TGFGRU), pra responder "quais
+// famílias de produto mais divergem".
+export async function getGruposDeProduto(codigosProduto: string[]): Promise<Map<string, string>> {
+  const grupos = new Map<string, string>();
+
+  const codigos = [...new Set(codigosProduto.map(Number).filter(Number.isFinite))];
+  if (codigos.length === 0) return grupos;
+
+  const TAMANHO_LOTE = 900;
+  for (let inicio = 0; inicio < codigos.length; inicio += TAMANHO_LOTE) {
+    const lote = codigos.slice(inicio, inicio + TAMANHO_LOTE);
+
+    const sql = `
+      SELECT
+        PRO.CODPROD AS "codigoProduto",
+        GRU.DESCRGRUPOPROD AS "grupo"
+      FROM TGFPRO PRO
+      LEFT JOIN TGFGRU GRU ON PRO.CODGRUPOPROD = GRU.CODGRUPOPROD
+      WHERE PRO.CODPROD IN (${lote.join(', ')})
+    `;
+
+    for (const linha of await executarQuery<LinhaGrupoSankhya>(sql)) {
+      grupos.set(String(linha.codigoProduto), linha.grupo ?? 'Sem grupo');
+    }
+  }
+
+  return grupos;
+}
+
 export function chaveSaldoItem(codigoProduto: string, localCodigo: string): string {
   return `${Number(codigoProduto)}|${Number(localCodigo)}`;
 }
