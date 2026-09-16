@@ -5,3 +5,7 @@ dist
 .env
 
 /src/generated/prisma
+
+# O build do painel web traz as fontes de ícone em assets/node_modules/ — a
+# regra "node_modules" acima as excluiria, e o painel iria pro ar sem ícones.
+!public/painel/assets/node_modules/
