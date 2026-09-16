@@ -38,4 +38,17 @@ export const env = {
   // Token estático só pra publicar uma nova versão do APK (rota de deploy,
   // não é login de usuário) — comparado direto contra o header x-publish-token.
   appPublishToken: process.env.APP_PUBLISH_TOKEN ?? '',
+  // Origens de navegador autorizadas a chamar a API, separadas por vírgula.
+  //
+  // O painel web é servido por este mesmo servidor (/painel), então em
+  // produção ele é same-origin e não precisa estar aqui. Esta lista existe
+  // pro Expo em desenvolvimento (http://localhost:8081) e pra um eventual
+  // painel em outro domínio. Vazio = só same-origin.
+  //
+  // Não afeta o app no celular: React Native não impõe CORS e não manda
+  // cabeçalho Origin.
+  origensPermitidas: (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origem) => origem.trim())
+    .filter(Boolean),
 };

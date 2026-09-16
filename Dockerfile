@@ -18,6 +18,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
+# Build estático do painel web (versionado no repositório) — o servidor o
+# serve em /painel. Sem esta linha a imagem final ficaria só com o dist.
+COPY --from=builder /app/public ./public
 
 EXPOSE 3000
 CMD ["node", "dist/server.js"]
