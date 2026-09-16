@@ -885,6 +885,57 @@ export async function getItensCopiaEstoquePorLocais(
   }));
 }
 
+interface LinhaReservaSankhya {
+  codigoProduto: number;
+  localCodigo: number;
+  empresaCodigo: number;
+  reservado: number;
+}
+
+// Quantidade reservada (TGFEST.RESERVADO) por produto+local+empresa, pra
+// entrar nos relatórios ao lado do que foi contado.
+//
+// Vem tudo de uma vez em vez de linha a linha: só as combinações COM reserva
+// são trazidas (hoje ~1.870 de 22.781 linhas de estoque), o que cabe com
+// folga numa consulta paginada e evita uma ida ao Sankhya por item do
+// relatório. Quem não aparecer no mapa tem reserva zero.
+//
+// A soma é necessária porque TGFEST quebra a linha por CONTROLE (lote):
+// o mesmo produto no mesmo local pode ter várias linhas.
+export async function getReservadosSankhya(): Promise<Map<string, number>> {
+  const reservas = new Map<string, number>();
+  let offset = 0;
+
+  while (true) {
+    const sql = `
+      SELECT
+        EST.CODPROD          AS "codigoProduto",
+        EST.CODLOCAL         AS "localCodigo",
+        EST.CODEMP           AS "empresaCodigo",
+        NVL(SUM(EST.RESERVADO), 0) AS "reservado"
+      FROM TGFEST EST
+      GROUP BY EST.CODPROD, EST.CODLOCAL, EST.CODEMP
+      HAVING NVL(SUM(EST.RESERVADO), 0) > 0
+      ORDER BY EST.CODPROD, EST.CODLOCAL, EST.CODEMP
+      OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY
+    `;
+
+    const pagina = await executarQuery<LinhaReservaSankhya>(sql);
+    for (const linha of pagina) {
+      reservas.set(chaveReserva(String(linha.codigoProduto), String(linha.localCodigo), String(linha.empresaCodigo)), linha.reservado);
+    }
+
+    if (pagina.length < 5000) break;
+    offset += 5000;
+  }
+
+  return reservas;
+}
+
+export function chaveReserva(codigoProduto: string, localCodigo: string, empresaCodigo: string): string {
+  return `${codigoProduto}|${localCodigo}|${empresaCodigo}`;
+}
+
 interface LinhaProdutoBuscaSankhya {
   codigoProduto: number;
   descricao: string;
