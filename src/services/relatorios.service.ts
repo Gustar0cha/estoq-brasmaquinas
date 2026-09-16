@@ -3,7 +3,12 @@ import ExcelJS from 'exceljs';
 import { prisma } from '../lib/prisma';
 import { ContagemItemDTO, getContagemItens, getFotoContagemItem } from './contagem.service';
 import { getFotoContagem, getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
-import { chaveReserva, getItemCopiaEstoque, getReservadosSankhya } from '../sankhya/client';
+import {
+  chaveReserva,
+  chaveSaldoItem,
+  getReservadosSankhya,
+  getSaldosAtuaisPorItem,
+} from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
 
@@ -173,8 +178,15 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
     { header: 'Qtd. Cópia de Estoque', key: 'quantidadeEsperada', width: 18 },
     { header: 'Qtd. Reservada (Sankhya)', key: 'quantidadeReservada', width: 20 },
     { header: 'Qtd. 1ª Contagem', key: 'quantidadeConferida1', width: 16 },
+    { header: 'Conferido por (1ª)', key: 'conferidoPor1', width: 22 },
+    { header: 'Data 1ª Contagem', key: 'dataConferencia1', width: 18 },
     { header: 'Qtd. 2ª Contagem', key: 'quantidadeConferida2', width: 16 },
+    { header: 'Conferido por (2ª)', key: 'conferidoPor2', width: 22 },
+    { header: 'Data 2ª Contagem', key: 'dataConferencia2', width: 18 },
+    { header: 'Diferença entre Contagens (2ª − 1ª)', key: 'diferencaEntreContagens', width: 28 },
+    { header: 'Resultado da Recontagem', key: 'resultadoRecontagem', width: 26 },
     { header: 'Motivo Divergência', key: 'motivo', width: 24 },
+    { header: 'Motivo 2ª Contagem', key: 'motivo2', width: 24 },
     { header: 'Foto 1ª Contagem', key: 'foto1', width: 22 },
     { header: 'Foto 2ª Contagem', key: 'foto2', width: 22 },
   ];
@@ -195,8 +207,15 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
       quantidadeReservada:
         reservas.get(chaveReserva(item.codigoProduto, item.localCodigo, item.empresaCodigo)) ?? 0,
       quantidadeConferida1: item.quantidadeConferida ?? '',
+      conferidoPor1: item.conferidoPorId ? (nomePorId.get(item.conferidoPorId) ?? '') : '',
+      dataConferencia1: formatarDataHora(item.dataConferencia),
       quantidadeConferida2: item.quantidadeConferida2 ?? '',
+      conferidoPor2: item.conferidoPor2Id ? (nomePorId.get(item.conferidoPor2Id) ?? '') : '',
+      dataConferencia2: formatarDataHora(item.dataConferencia2),
+      diferencaEntreContagens: diferencaEntreContagens(item) ?? '',
+      resultadoRecontagem: resultadoDaRecontagem(item),
       motivo: item.motivo ?? '',
+      motivo2: item.motivo2 ?? '',
     });
     linha.height = 70;
 
@@ -204,19 +223,46 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
       const buffer = await coletarBufferFotoContagem(item.id, 1);
       if (buffer) {
         const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 13, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
+        sheet.addImage(imageId, { tl: { col: 19, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
       }
     }
     if (item.temFoto2) {
       const buffer = await coletarBufferFotoContagem(item.id, 2);
       if (buffer) {
         const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 14, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
+        sheet.addImage(imageId, { tl: { col: 20, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
       }
     }
   }
 
   return workbook.xlsx.writeBuffer();
+}
+
+// A 2ª contagem existe pra conferir a 1ª. Quando as duas batem, o número está
+// confirmado; quando não batem, quem contou primeiro errou — é essa a
+// informação que o gestor precisa pra saber em quem confiar.
+//
+// Sem 2ª contagem não há o que concluir: a coluna fica vazia em vez de dizer
+// "OK", que daria uma confiança que ninguém verificou.
+function diferencaEntreContagens(item: ContagemItemDTO): number | null {
+  if (item.quantidadeConferida === null || item.quantidadeConferida === undefined) return null;
+  if (item.quantidadeConferida2 === undefined) return null;
+  return item.quantidadeConferida2 - item.quantidadeConferida;
+}
+
+function resultadoDaRecontagem(item: ContagemItemDTO): string {
+  const diferenca = diferencaEntreContagens(item);
+  if (diferenca === null) return '';
+  if (diferenca === 0) return 'Confirmada (1ª e 2ª bateram)';
+
+  const paraMais = diferenca > 0;
+  return `ERRO NA 1ª CONTAGEM (contou ${Math.abs(diferenca)} a ${paraMais ? 'menos' : 'mais'})`;
+}
+
+function formatarDataHora(iso?: string): string {
+  if (!iso) return '';
+  const data = new Date(iso);
+  return Number.isNaN(data.getTime()) ? '' : data.toLocaleString('pt-BR');
 }
 
 export interface FiltroRelatorioSistemaVsContado {
@@ -234,6 +280,8 @@ export async function gerarRelatorioSistemaVsContadoExcel(
 ): Promise<ExcelJS.Buffer> {
   const itens = (await getContagemItens(filtro)).filter((item) => item.quantidadeConferida !== null);
   const reservas = await getReservadosSankhya();
+  // Uma consulta em lote no lugar de uma por linha do relatório.
+  const saldosAtuais = await getSaldosAtuaisPorItem(itens);
 
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Sistema vs. Contado');
@@ -247,6 +295,7 @@ export async function gerarRelatorioSistemaVsContadoExcel(
     { header: 'Qtd. 1ª Contagem', key: 'quantidadeConferida1', width: 16 },
     { header: 'Qtd. 2ª Contagem', key: 'quantidadeConferida2', width: 16 },
     { header: 'Última Contagem', key: 'ultimaContagem', width: 14 },
+    { header: 'Resultado da Recontagem', key: 'resultadoRecontagem', width: 26 },
     { header: 'Diferença (sistema atual − última contagem)', key: 'diferencaAtual', width: 30 },
     { header: 'Data da Contagem', key: 'dataContagem', width: 18 },
   ];
@@ -254,20 +303,21 @@ export async function gerarRelatorioSistemaVsContadoExcel(
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
 
   for (const item of itens as ContagemItemDTO[]) {
-    const atual = await getItemCopiaEstoque(item.codigoProduto, item.localCodigo);
+    const saldoAtual = saldosAtuais.get(chaveSaldoItem(item.codigoProduto, item.localCodigo));
     const ultimaContagem = item.quantidadeConferida2 ?? item.quantidadeConferida ?? 0;
 
     sheet.addRow({
       sku: item.codigoProduto,
       descricao: item.descricao,
       local: item.local,
-      quantidadeSistema: atual?.quantidadeEsperada ?? '',
+      quantidadeSistema: saldoAtual ?? '',
       quantidadeReservada:
         reservas.get(chaveReserva(item.codigoProduto, item.localCodigo, item.empresaCodigo)) ?? 0,
       quantidadeConferida1: item.quantidadeConferida ?? '',
       quantidadeConferida2: item.quantidadeConferida2 ?? '',
       ultimaContagem: item.quantidadeConferida2 !== undefined ? '2ª' : '1ª',
-      diferencaAtual: atual ? atual.quantidadeEsperada - ultimaContagem : '',
+      resultadoRecontagem: resultadoDaRecontagem(item),
+      diferencaAtual: saldoAtual !== undefined ? saldoAtual - ultimaContagem : '',
       dataContagem: item.dataConferencia2 ?? item.dataConferencia ?? '',
     });
   }

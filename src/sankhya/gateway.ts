@@ -1,4 +1,4 @@
-import { obterTokenSankhya } from './auth';
+import { invalidarTokenSankhya, obterTokenSankhya } from './auth';
 import { env } from '../lib/env';
 
 // Executa SQL via DbExplorerSP.executeQuery (API Gateway do Sankhya).
@@ -25,7 +25,32 @@ interface ExecuteQueryResponse {
   };
 }
 
+// O Sankhya recusa um token com "Não autorizado" mesmo dentro da validade que
+// ele próprio informou (o token dura 300s, e a sessão pode cair antes). Como
+// a falha é transitória, vale uma segunda tentativa com token novo — sem isso
+// o usuário só via "Sankhya retornou erro na consulta: Não autorizado".
+function ehFalhaDeAutorizacao(erro: unknown): boolean {
+  const mensagem = erro instanceof Error ? erro.message.toLowerCase() : '';
+  return (
+    mensagem.includes('não autorizado') ||
+    mensagem.includes('nao autorizado') ||
+    mensagem.includes('unauthorized') ||
+    mensagem.includes('http 401')
+  );
+}
+
 export async function executarQuery<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  try {
+    return await executarUmaVez<T>(sql);
+  } catch (erro) {
+    if (!ehFalhaDeAutorizacao(erro)) throw erro;
+
+    invalidarTokenSankhya();
+    return executarUmaVez<T>(sql);
+  }
+}
+
+async function executarUmaVez<T>(sql: string): Promise<T[]> {
   const token = await obterTokenSankhya();
 
   const resposta = await fetch(

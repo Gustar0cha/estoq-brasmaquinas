@@ -932,6 +932,94 @@ export async function getReservadosSankhya(): Promise<Map<string, number>> {
   return reservas;
 }
 
+// Saldo atual do sistema para VÁRIOS produto+local de uma vez.
+//
+// Existe porque o relatório "Sistema × Contado" consultava o Sankhya uma vez
+// por linha, em sequência: um relatório de 500 itens virava 500 idas ao
+// gateway, o que além de lento é o tipo de rajada que faz o Sankhya recusar
+// com "Não autorizado".
+//
+// A regra de saldo é a MESMA de getItemCopiaEstoque, de propósito, pra não
+// mudar nenhum número do relatório: a cópia de estoque mais recente do
+// produto+local e, quando não existe cópia, o saldo atual do TGFEST.
+export async function getSaldosAtuaisPorItem(
+  pares: { codigoProduto: string; localCodigo: string }[]
+): Promise<Map<string, number>> {
+  const saldos = new Map<string, number>();
+
+  const validos = pares
+    .map((par) => ({ produto: Number(par.codigoProduto), local: Number(par.localCodigo) }))
+    .filter((par) => Number.isFinite(par.produto) && Number.isFinite(par.local));
+
+  // Sem duplicatas: o mesmo produto+local pode aparecer em mais de uma linha.
+  const unicos = new Map<string, { produto: number; local: number }>();
+  for (const par of validos) unicos.set(`${par.produto}|${par.local}`, par);
+  const lista = [...unicos.values()];
+  if (lista.length === 0) return saldos;
+
+  // O Oracle limita a lista de um IN, e o gateway trunca em 5000 linhas —
+  // 500 pares por consulta fica com folga dos dois lados.
+  const TAMANHO_LOTE = 500;
+
+  for (let inicio = 0; inicio < lista.length; inicio += TAMANHO_LOTE) {
+    const lote = lista.slice(inicio, inicio + TAMANHO_LOTE);
+    const tuplas = lote.map((par) => `(${par.produto}, ${par.local})`).join(', ');
+
+    // ROW_NUMBER reproduz o "ORDER BY DTCONTAGEM DESC, primeira linha" que a
+    // versão item a item fazia.
+    const sqlCopia = `
+      SELECT "codigoProduto", "localCodigo", "quantidadeEsperada"
+      FROM (
+        SELECT
+          CTE.CODPROD  AS "codigoProduto",
+          CTE.CODLOCAL AS "localCodigo",
+          CTE.QTDEST   AS "quantidadeEsperada",
+          ROW_NUMBER() OVER (
+            PARTITION BY CTE.CODPROD, CTE.CODLOCAL ORDER BY CTE.DTCONTAGEM DESC
+          ) AS RN
+        FROM TGFCTE CTE
+        WHERE (CTE.CODPROD, CTE.CODLOCAL) IN (${tuplas})
+      )
+      WHERE RN = 1
+    `;
+
+    for (const linha of await executarQuery<LinhaSaldoItemSankhya>(sqlCopia)) {
+      saldos.set(`${linha.codigoProduto}|${linha.localCodigo}`, linha.quantidadeEsperada);
+    }
+
+    // Quem não tem cópia de estoque cai no saldo atual, como no item a item.
+    const semCopia = lote.filter((par) => !saldos.has(`${par.produto}|${par.local}`));
+    if (semCopia.length === 0) continue;
+
+    const tuplasSemCopia = semCopia.map((par) => `(${par.produto}, ${par.local})`).join(', ');
+    const sqlEstoque = `
+      SELECT
+        EST.CODPROD  AS "codigoProduto",
+        EST.CODLOCAL AS "localCodigo",
+        NVL(SUM(EST.ESTOQUE), 0) AS "quantidadeEsperada"
+      FROM TGFEST EST
+      WHERE (EST.CODPROD, EST.CODLOCAL) IN (${tuplasSemCopia})
+      GROUP BY EST.CODPROD, EST.CODLOCAL
+    `;
+
+    for (const linha of await executarQuery<LinhaSaldoItemSankhya>(sqlEstoque)) {
+      saldos.set(`${linha.codigoProduto}|${linha.localCodigo}`, linha.quantidadeEsperada);
+    }
+  }
+
+  return saldos;
+}
+
+export function chaveSaldoItem(codigoProduto: string, localCodigo: string): string {
+  return `${Number(codigoProduto)}|${Number(localCodigo)}`;
+}
+
+interface LinhaSaldoItemSankhya {
+  codigoProduto: number;
+  localCodigo: number;
+  quantidadeEsperada: number;
+}
+
 export function chaveReserva(codigoProduto: string, localCodigo: string, empresaCodigo: string): string {
   return `${codigoProduto}|${localCodigo}|${empresaCodigo}`;
 }
