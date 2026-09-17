@@ -1,3 +1,4 @@
+import { ehLocalPaiAgrupador } from '../lib/agrupadores';
 import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
@@ -7,9 +8,15 @@ import {
   getItensCopiaEstoquePorLocais,
   getLocaisComCopiaEstoque,
   getLocaisEsperadosDoProduto,
+  getPaiDoLocal,
   ProdutoBuscaSankhya,
 } from '../sankhya/client';
-import { chavePredio, parsearLocalizacao } from '../sankhya/localizacao';
+import {
+  chavePredio,
+  resolverLocalizacao,
+  rotuloDaSubdivisao,
+  rotuloDoGrupo,
+} from '../sankhya/localizacao';
 import {
   ehFilial,
   ehLocalDeLoja,
@@ -222,7 +229,11 @@ export async function getPrediosDisponiveis(
   const grupos = new Map<string, PredioDisponivel>();
 
   for (const local of locais) {
-    const { rua, predio } = parsearLocalizacao(local.local);
+    const { rua, predio, nivel } = resolverLocalizacao(
+      local.local,
+      { codigo: local.localPaiCodigo, descricao: local.localPai },
+      ehLocalPaiAgrupador
+    );
     const filialDoGrupo = filialDoLocal(local.localCodigo);
     const chave = `${local.empresaCodigo}|${filialDoGrupo ?? '-'}|${chavePredio(rua, predio)}`;
     let grupo = grupos.get(chave);
@@ -242,7 +253,6 @@ export async function getPrediosDisponiveis(
     }
     grupo.totalItens += local.totalItens;
     grupo.totalLocais += 1;
-    const { nivel } = parsearLocalizacao(local.local);
     grupo.locais.push({ localCodigo: local.localCodigo, local: local.local, nivel, totalItens: local.totalItens });
     const resumoNivel = grupo.niveis.find((n) => n.nivel === nivel);
     if (resumoNivel) {
@@ -254,7 +264,16 @@ export async function getPrediosDisponiveis(
   }
 
   for (const grupo of grupos.values()) {
-    grupo.niveis.sort((a, b) => Number(a.nivel ?? 9999) - Number(b.nivel ?? 9999));
+    // Níveis numéricos em ordem numérica; nas áreas (agrupadores) a subdivisão
+    // é o nome do local, então cai na ordem alfabética.
+    grupo.niveis.sort((a, b) => {
+      const na = Number(a.nivel);
+      const nb = Number(b.nivel);
+      if (a.nivel !== null && b.nivel !== null && Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      if (a.nivel === null) return 1;
+      if (b.nivel === null) return -1;
+      return a.nivel.localeCompare(b.nivel, 'pt-BR', { numeric: true });
+    });
   }
 
   return Array.from(grupos.values()).sort((a, b) => {
@@ -316,6 +335,10 @@ export async function atribuirContagemPredio(
     throw new Error('Esse nível não tem itens na cópia de estoque.');
   }
 
+  // A subdivisão de cada local já foi resolvida na montagem do grupo (endereço
+  // ou, numa área, o nome do local) — relê-la do nome aqui desfaria isso.
+  const nivelPorLocal = new Map(grupo.locais.map((l) => [l.localCodigo, l.nivel]));
+
   const itensCopia = await getItensCopiaEstoquePorLocais(
     locaisAlvo.map((l) => l.localCodigo),
     input.empresaCodigo
@@ -346,7 +369,7 @@ export async function atribuirContagemPredio(
       status: 'PENDENTE',
       rua: input.rua,
       predio: input.predio,
-      nivel: parsearLocalizacao(i.local).nivel,
+      nivel: nivelPorLocal.get(i.localCodigo) ?? null,
       atribuidoParaId: input.atribuidoParaId,
       atribuidoPorId: input.atribuidoPorId,
     })),
@@ -354,8 +377,8 @@ export async function atribuirContagemPredio(
 
   const nomeAdmin = await nomeUsuario(input.atribuidoPorId);
   const rotulo =
-    `Rua ${input.rua ?? '?'} Prédio ${input.predio ?? '?'}` +
-    (input.nivel !== undefined ? ` Nível ${input.nivel ?? '?'}` : '');
+    rotuloDoGrupo(input.rua, input.predio) +
+    (input.nivel !== undefined ? ` · ${rotuloDaSubdivisao(input.nivel)}` : '');
   await notificarUsuario(
     'ATRIBUICAO_CONTAGEM',
     `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`,
@@ -414,8 +437,7 @@ function whereDoPredio(alvo: AlvoAtribuicaoPredio) {
 }
 
 function rotuloPredio(rua: string | null, predio: string | null): string {
-  if (!rua && !predio) return 'Outros locais';
-  return `Rua ${rua ?? '?'}${predio ? ` Prédio ${predio}` : ''}`;
+  return rotuloDoGrupo(rua, predio);
 }
 
 export interface ReatribuirContagemPredioInput extends AlvoAtribuicaoPredio {
@@ -609,7 +631,11 @@ export async function registrarItemForaDoLugar(
   const divergenciaLocal = !esperadoAqui;
   const localEsperado = outrosLocais.length > 0 ? outrosLocais.map((l) => l.local).join(' | ') : null;
 
-  const { rua, predio, nivel } = parsearLocalizacao(base.local);
+  const { rua, predio, nivel } = resolverLocalizacao(
+    base.local,
+    await getPaiDoLocal(base.localCodigo),
+    ehLocalPaiAgrupador
+  );
 
   const criado = await prisma.contagemItem.create({
     data: {

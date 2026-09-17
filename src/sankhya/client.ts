@@ -709,6 +709,8 @@ export async function getProdutosNegativadosSankhya(
 interface LinhaLocalComCopiaSankhya {
   localCodigo: number;
   local: string | null;
+  localPaiCodigo: number | null;
+  localPai: string | null;
   empresaCodigo: number;
   empresaNome: string | null;
   totalItens: number;
@@ -717,6 +719,10 @@ interface LinhaLocalComCopiaSankhya {
 export interface LocalComCopiaEstoqueSankhya {
   localCodigo: string;
   local: string;
+  // Pai do local na árvore do Sankhya (TGFLOC.CODLOCALPAI) — decide o grupo
+  // dos locais que ficam dentro de uma área (ver lib/agrupadores.ts).
+  localPaiCodigo: string | null;
+  localPai: string | null;
   empresaCodigo: string;
   empresaNome: string;
   totalItens: number;
@@ -765,6 +771,8 @@ export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalC
       SELECT
         CTE.CODLOCAL AS "localCodigo",
         MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(CTE.CODLOCAL))) AS "local",
+        MAX(LOC.CODLOCALPAI) AS "localPaiCodigo",
+        MAX(PAI.DESCRLOCAL) AS "localPai",
         CTE.CODEMP AS "empresaCodigo",
         MAX(EMP.NOMEFANTASIA) AS "empresaNome",
         COUNT(DISTINCT CTE.CODPROD) AS "totalItens"
@@ -772,6 +780,7 @@ export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalC
       INNER JOIN (${SQL_ULTIMA_COPIA_POR_LOCAL}) ULT
         ON ULT.CODLOCAL = CTE.CODLOCAL AND ULT.CODEMP = CTE.CODEMP AND ULT.DTULTIMA = CTE.DTCONTAGEM
       LEFT JOIN TGFLOC LOC ON CTE.CODLOCAL = LOC.CODLOCAL
+      LEFT JOIN TGFLOC PAI ON LOC.CODLOCALPAI = PAI.CODLOCAL
       LEFT JOIN TSIEMP EMP ON CTE.CODEMP = EMP.CODEMP
       WHERE CTE.QTDEST > 0
         AND ${FILTRO_SQL_SEM_QUARENTENA}
@@ -791,6 +800,8 @@ export async function getLocaisComCopiaEstoque(empresa?: string): Promise<LocalC
   return todasAsLinhas.map((l) => ({
     localCodigo: String(l.localCodigo),
     local: l.local ?? String(l.localCodigo),
+    localPaiCodigo: l.localPaiCodigo === null || l.localPaiCodigo === undefined ? null : String(l.localPaiCodigo),
+    localPai: l.localPai ?? null,
     empresaCodigo: String(l.empresaCodigo),
     empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
     totalItens: l.totalItens,
@@ -1148,6 +1159,24 @@ interface LinhaSaldoItemSankhya {
   codigoProduto: number;
   localCodigo: number;
   quantidadeEsperada: number;
+}
+
+// Pai de um local na árvore do Sankhya. Usado quando o local chega sozinho
+// (item fora do lugar), sem passar pela lista de locais com cópia.
+export async function getPaiDoLocal(
+  localCodigo: string
+): Promise<{ codigo: string | null; descricao: string | null } | null> {
+  const codigo = Number(localCodigo);
+  if (!Number.isFinite(codigo)) return null;
+
+  const [linha] = await executarQuery<{ codigo: number | null; descricao: string | null }>(`
+    SELECT LOC.CODLOCALPAI AS "codigo", PAI.DESCRLOCAL AS "descricao"
+    FROM TGFLOC LOC
+    LEFT JOIN TGFLOC PAI ON LOC.CODLOCALPAI = PAI.CODLOCAL
+    WHERE LOC.CODLOCAL = ${codigo}
+  `);
+  if (!linha) return null;
+  return { codigo: linha.codigo === null ? null : String(linha.codigo), descricao: linha.descricao };
 }
 
 export function chaveReserva(codigoProduto: string, localCodigo: string, empresaCodigo: string): string {

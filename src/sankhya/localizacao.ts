@@ -49,6 +49,36 @@ export function parsearLocalizacao(descricaoLocal: string | null | undefined): L
   return { rua, predio, nivel };
 }
 
+// Localização usada no agrupamento da contagem: o endereço lido do nome, a não
+// ser que o local esteja dentro de um pai agrupador (ver lib/agrupadores.ts).
+// Nesse caso o grupo é o próprio pai ("AUTO ATENDIMENTO") e a subdivisão é o
+// local filho ("(AUTO) ILHA 1"), mesmo que o nome do filho pareça um endereço
+// — o que vale é onde ele está na árvore do Sankhya.
+export function resolverLocalizacao(
+  descricaoLocal: string | null | undefined,
+  pai: { codigo: string | null | undefined; descricao: string | null | undefined } | null | undefined,
+  ehAgrupador: (codigoPai: string | null | undefined) => boolean
+): LocalizacaoParseada {
+  if (pai && ehAgrupador(pai.codigo) && pai.descricao) {
+    return { rua: null, predio: pai.descricao.trim(), nivel: (descricaoLocal ?? '').trim() || null };
+  }
+  return parsearLocalizacao(descricaoLocal);
+}
+
+// Rótulo de um grupo pra mensagens: endereço ("Rua 2 Prédio 6") ou, pros
+// agrupadores, só o nome da área ("AUTO ATENDIMENTO").
+export function rotuloDoGrupo(rua: string | null, predio: string | null): string {
+  if (!rua && !predio) return 'Outros locais';
+  if (!rua) return /^[0-9]+$/.test(predio ?? '') ? `Prédio ${predio}` : (predio as string);
+  return `Rua ${rua}${predio ? ` Prédio ${predio}` : ''}`;
+}
+
+// Subdivisão: número de nível ("Nível 2") ou, nos agrupadores, o nome do local.
+export function rotuloDaSubdivisao(nivel: string | null): string {
+  if (nivel === null) return 'Sem nível';
+  return /^[0-9]+$/.test(nivel) ? `Nível ${nivel}` : nivel;
+}
+
 // Chave de agrupamento estável pra uma rua+prédio (usada tanto pra montar a
 // lista de prédios disponíveis quanto pras colunas persistidas em
 // ContagemItem) — null em qualquer um dos dois vira "outros locais na UI,
