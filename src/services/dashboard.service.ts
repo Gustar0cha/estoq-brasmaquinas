@@ -18,6 +18,13 @@ export interface FiltroDashboard {
   modo: ModoDashboard;
   dataInicio?: Date;
   dataFim?: Date;
+  // Empresa do Sankhya (CODEMP). Ausente = todas.
+  empresaCodigo?: string;
+}
+
+export interface EmpresaDashboard {
+  codigo: string;
+  nome: string;
 }
 
 export interface RankingUsuarioDashboard {
@@ -84,6 +91,12 @@ export interface DashboardContagem {
     aContar: number;
   };
 
+  // Empresas que têm contagem, pro filtro do painel. Vem sempre completa,
+  // independente da empresa escolhida — senão escolher uma esconderia as
+  // outras e não haveria como voltar.
+  empresas: EmpresaDashboard[];
+  empresaSelecionada: string | null;
+
   ranking: RankingUsuarioDashboard[];
   porDia: DiaDashboard[];
   grupos: GrupoDashboard[];
@@ -130,9 +143,12 @@ function diaDe(data: Date): string {
 }
 
 export async function getDashboardContagem(filtro: FiltroDashboard): Promise<DashboardContagem> {
+  const daEmpresa = filtro.empresaCodigo ? { empresaCodigo: filtro.empresaCodigo } : {};
+
   const where =
     filtro.modo === 'HISTORICO'
       ? {
+          ...daEmpresa,
           status: { in: STATUS_CONTADO },
           // No histórico a data que importa é a da contagem, não a da
           // atribuição: o recorte é "o que foi contado nesse período".
@@ -141,7 +157,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
             { dataConferencia2: { gte: filtro.dataInicio, lte: filtro.dataFim } },
           ],
         }
-      : {};
+      : daEmpresa;
 
   const itens = (await prisma.contagemItem.findMany({
     where,
@@ -165,6 +181,15 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
 
   const usuarios = await prisma.usuario.findMany({ select: { id: true, nome: true } });
   const nomePorId = new Map(usuarios.map((u) => [u.id, u.nome]));
+
+  // Lista de empresas à parte: uma agregação barata, sem o recorte de empresa.
+  const empresasBrutas = await prisma.contagemItem.groupBy({
+    by: ['empresaCodigo', 'empresaNome'],
+    _count: { _all: true },
+  });
+  const empresas: EmpresaDashboard[] = [...
+    new Map(empresasBrutas.map((e) => [e.empresaCodigo, { codigo: e.empresaCodigo, nome: e.empresaNome }])).values(),
+  ].sort((a, b) => a.nome.localeCompare(b.nome));
 
   // Custo e grupo vêm do Sankhya em duas consultas em lote, não uma por item.
   const [custos, grupos] = await Promise.all([
@@ -334,6 +359,8 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
       fim: filtro.dataFim?.toISOString() ?? null,
     },
     atualizadoEm: new Date().toISOString(),
+    empresas,
+    empresaSelecionada: filtro.empresaCodigo ?? null,
     totais,
     valores,
     ranking,

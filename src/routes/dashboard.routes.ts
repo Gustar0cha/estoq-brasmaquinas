@@ -10,6 +10,7 @@ const filtroSchema = z.object({
   modo: z.enum(['AO_VIVO', 'HISTORICO']).default('AO_VIVO'),
   dataInicio: z.coerce.date().optional(),
   dataFim: z.coerce.date().optional(),
+  empresaCodigo: z.string().min(1).optional(),
 });
 
 dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
