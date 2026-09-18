@@ -152,10 +152,6 @@ model ItemConferenciaResultado {
   // produtos nesse ambiente, então não há o que validar contra).
   codigoLocalBipado    String?
   codigoProdutoBipado  String?
-  // Chave do objeto no MinIO (nunca uma URL pública) — a foto só é servida
-  // via proxy autenticado da nossa API, o app não recebe acesso direto ao
-  // bucket nem essa foto aparece em nenhuma tela do operador.
-  fotoChaveArmazenamento String?
 
   @@unique([chave, numeroContagem])
   @@map("item_conferencia_resultados")
@@ -259,8 +255,22 @@ model ContagemItem {
   unidade            String
   local              String
   localCodigo        String
-  quantidadeEsperada Float
-  dataCopiaEstoque   DateTime?
+
+  // O saldo vem do estoque REAL do Sankhya (TGFEST), relido a cada 5 minutos
+  // — não mais da cópia de estoque diária. São três números porque a operação
+  // usa os três:
+  //   quantidadeTotal     = tudo que o sistema diz que está no local
+  //   quantidadeReservada = preso em pedido pendente (já separado pra entrega)
+  //   quantidadeEsperada  = total - reservada, e é contra ELE que a contagem
+  //                         é conferida: o item reservado já saiu da prateleira.
+  quantidadeEsperada  Float
+  quantidadeTotal     Float?
+  quantidadeReservada Float  @default(0)
+  // Momento em que esse saldo foi lido do Sankhya.
+  dataSaldo           DateTime?
+  // Itens criados antes da virada pro saldo real guardam aqui a data da cópia
+  // de estoque que os originou. Não é mais preenchido.
+  dataCopiaEstoque    DateTime?
 
   // Rua/prédio extraídos de `local` na hora da atribuição (parsearLocalizacao,
   // ver src/sankhya/localizacao.ts) — persistidos, não recalculados depois,
@@ -305,7 +315,6 @@ model ContagemItem {
   conferidoPorId         String?
   codigoLocalBipado      String?
   codigoProdutoBipado    String?
-  fotoChaveArmazenamento String?
 
   // pedido de 2ª contagem
   segundaContagemSolicitada      Boolean  @default(false)
@@ -325,7 +334,6 @@ model ContagemItem {
   conferidoPor2Id         String?
   codigoLocalBipado2      String?
   codigoProdutoBipado2    String?
-  fotoChaveArmazenamento2 String?
 
   @@map("contagem_itens")
 }

@@ -1,16 +1,19 @@
 import { ehLocalPaiAgrupador } from '../lib/agrupadores';
-import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
   buscarProdutosSankhya,
   ehLocalDeQuarentena,
-  getItemCopiaEstoque,
-  getItensCopiaEstoquePorLocais,
-  getLocaisComCopiaEstoque,
   getLocaisEsperadosDoProduto,
   getPaiDoLocal,
   ProdutoBuscaSankhya,
 } from '../sankhya/client';
+import {
+  getItensComSaldoPorLocais,
+  getLocaisComSaldo,
+  getPedidosQueReservam,
+  getSaldoDoItem,
+  PedidoQueReserva,
+} from '../sankhya/estoque';
 import {
   chavePredio,
   resolverLocalizacao,
@@ -58,8 +61,12 @@ export interface ContagemItemDTO {
   unidade: string;
   local: string;
   localCodigo: string;
+  // Conferida contra o DISPONÍVEL (total - reservado): o item reservado já
+  // foi separado pra um pedido e não deveria mais estar na prateleira.
   quantidadeEsperada: number;
-  dataCopiaEstoque?: string;
+  quantidadeTotal: number | null;
+  quantidadeReservada: number;
+  dataSaldo?: string;
   status: StatusContagemItem;
   rua: string | null;
   predio: string | null;
@@ -83,7 +90,6 @@ export interface ContagemItemDTO {
   conferidoPorId?: string;
   codigoLocalBipado?: string;
   codigoProdutoBipado?: string;
-  temFoto?: boolean;
 
   // 2ª contagem — só existe se foi solicitada pelo gestor
   segundaContagemSolicitada: boolean;
@@ -97,7 +103,6 @@ export interface ContagemItemDTO {
   conferidoPor2Id?: string;
   codigoLocalBipado2?: string;
   codigoProdutoBipado2?: string;
-  temFoto2?: boolean;
 }
 
 export interface IniciarContagemItemInput {
@@ -113,7 +118,6 @@ export interface EnviarContagemItemInput {
   quantidadeConferida: number;
   motivo?: string;
   observacao?: string;
-  foto?: { buffer: Buffer; mimeType: string };
 }
 
 export interface FiltroContagemItens {
@@ -147,7 +151,9 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     local: item.local,
     localCodigo: item.localCodigo,
     quantidadeEsperada: item.quantidadeEsperada,
-    dataCopiaEstoque: item.dataCopiaEstoque?.toISOString(),
+    quantidadeTotal: item.quantidadeTotal ?? null,
+    quantidadeReservada: item.quantidadeReservada ?? 0,
+    dataSaldo: item.dataSaldo?.toISOString(),
     status: item.status,
     rua: item.rua ?? null,
     predio: item.predio ?? null,
@@ -170,7 +176,6 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     conferidoPorId: item.conferidoPorId ?? undefined,
     codigoLocalBipado: item.codigoLocalBipado ?? undefined,
     codigoProdutoBipado: item.codigoProdutoBipado ?? undefined,
-    temFoto: Boolean(item.fotoChaveArmazenamento),
 
     segundaContagemSolicitada: item.segundaContagemSolicitada,
     segundaContagemAtribuidaPara: item.segundaContagemUsuarioId ?? null,
@@ -183,7 +188,6 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     conferidoPor2Id: item.conferidoPor2Id ?? undefined,
     codigoLocalBipado2: item.codigoLocalBipado2 ?? undefined,
     codigoProdutoBipado2: item.codigoProdutoBipado2 ?? undefined,
-    temFoto2: Boolean(item.fotoChaveArmazenamento2),
   };
 }
 
@@ -193,7 +197,7 @@ async function nomeUsuario(usuarioId: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Descoberta de prédios (a partir da cópia de estoque já gerada no Sankhya)
+// Descoberta de prédios (a partir do saldo real do Sankhya)
 // ---------------------------------------------------------------------------
 
 export interface PredioDisponivel {
@@ -209,8 +213,9 @@ export interface PredioDisponivel {
   niveis: { nivel: string | null; totalItens: number; totalLocais: number }[];
 }
 
-// Agrupa os locais que têm cópia de estoque (TGFCTE) por rua/prédio — é essa
-// lista que o admin navega pra escolher o que atribuir. Locais sem rua/prédio
+// Agrupa por rua/prédio os locais que têm saldo AGORA (TGFEST, relido a cada
+// 5 min) — é essa lista que o admin navega pra escolher o que atribuir.
+// Prateleira sem saldo não entra: não há o que contar nela. Locais sem rua/prédio
 // reconhecível caem num grupo { rua: null, predio: null } ("Outros locais").
 // Duas peneiras antes de agrupar:
 //   1. endereçamento antigo fica de fora (ver ehLocalDeLoja) — senão um
@@ -222,7 +227,7 @@ export async function getPrediosDisponiveis(
   empresa?: string,
   filial?: string | null
 ): Promise<PredioDisponivel[]> {
-  const todosOsLocais = await getLocaisComCopiaEstoque(empresa);
+  const todosOsLocais = await getLocaisComSaldo(empresa);
   const locais = todosOsLocais.filter(
     (l) => ehLocalDeLoja(l.localCodigo) && localVisivelPara(l.localCodigo, filial)
   );
@@ -324,7 +329,7 @@ export async function atribuirContagemPredio(
       (input.filial === undefined || p.filial === (input.filial ?? null))
   );
   if (!grupo) {
-    throw new Error('Não há cópia de estoque registrada pra esse prédio.');
+    throw new Error('Esse prédio não tem saldo em estoque pra contar.');
   }
 
   await exigirFilialCompativel(input.atribuidoParaId, grupo.filial);
@@ -332,14 +337,14 @@ export async function atribuirContagemPredio(
   const locaisAlvo =
     input.nivel === undefined ? grupo.locais : grupo.locais.filter((l) => l.nivel === input.nivel);
   if (locaisAlvo.length === 0) {
-    throw new Error('Esse nível não tem itens na cópia de estoque.');
+    throw new Error('Esse nível não tem itens com saldo pra contar.');
   }
 
   // A subdivisão de cada local já foi resolvida na montagem do grupo (endereço
   // ou, numa área, o nome do local) — relê-la do nome aqui desfaria isso.
   const nivelPorLocal = new Map(grupo.locais.map((l) => [l.localCodigo, l.nivel]));
 
-  const itensCopia = await getItensCopiaEstoquePorLocais(
+  const itensComSaldo = await getItensComSaldoPorLocais(
     locaisAlvo.map((l) => l.localCodigo),
     input.empresaCodigo
   );
@@ -349,7 +354,7 @@ export async function atribuirContagemPredio(
     select: { codigoProduto: true, localCodigo: true },
   });
   const chavesExistentes = new Set(existentes.map((e) => `${e.codigoProduto}|${e.localCodigo}`));
-  const novos = itensCopia.filter((i) => !chavesExistentes.has(`${i.codigoProduto}|${i.localCodigo}`));
+  const novos = itensComSaldo.filter((i) => !chavesExistentes.has(`${i.codigoProduto}|${i.localCodigo}`));
 
   if (novos.length === 0) {
     return { criados: 0 };
@@ -364,8 +369,10 @@ export async function atribuirContagemPredio(
       unidade: i.unidade,
       local: i.local,
       localCodigo: i.localCodigo,
-      quantidadeEsperada: i.quantidadeEsperada,
-      dataCopiaEstoque: i.dataCopiaEstoque ? new Date(i.dataCopiaEstoque) : null,
+      quantidadeEsperada: i.quantidadeDisponivel,
+      quantidadeTotal: i.quantidadeTotal,
+      quantidadeReservada: i.quantidadeReservada,
+      dataSaldo: new Date(),
       status: 'PENDENTE',
       rua: input.rua,
       predio: input.predio,
@@ -511,13 +518,13 @@ export async function reatribuirContagemPredio(
 export interface RemoverAtribuicaoPredioInput extends AlvoAtribuicaoPredio {
   removidoPorId: string;
   // true = limpeza total do prédio, incluindo o que já foi contado (a
-  // contagem e a foto somem junto, sem volta). false/ausente = só tira da
-  // lista o que ninguém contou.
+  // contagem some junto, sem volta). false/ausente = só tira da lista o que
+  // ninguém contou.
   incluirContados?: boolean;
 }
 
 // Remove a atribuição. O que ninguém contou é apagado (e é recriado
-// igualzinho a partir da cópia de estoque numa próxima atribuição). O que já
+// igualzinho a partir do saldo do Sankhya numa próxima atribuição). O que já
 // foi contado só sai com `incluirContados` — senão fica registrado, e
 // `mantidos` diz quantos ficaram.
 export async function removerAtribuicaoPredio(
@@ -600,7 +607,7 @@ export async function registrarItemForaDoLugar(
     );
   }
 
-  const base = await getItemCopiaEstoque(input.codigoProduto, input.codigoLocalBipado);
+  const base = await getSaldoDoItem(input.codigoProduto, input.codigoLocalBipado);
   if (!base) {
     throw new Error('Não achei esse produto ou esse local no Sankhya. Confira os códigos.');
   }
@@ -626,7 +633,7 @@ export async function registrarItemForaDoLugar(
 
   const locaisEsperados = await getLocaisEsperadosDoProduto(base.codigoProduto, base.empresaCodigo);
   const esperadoAqui =
-    base.quantidadeEsperada > 0 || locaisEsperados.some((l) => l.localCodigo === base.localCodigo);
+    base.quantidadeDisponivel > 0 || locaisEsperados.some((l) => l.localCodigo === base.localCodigo);
   const outrosLocais = locaisEsperados.filter((l) => l.localCodigo !== base.localCodigo);
   const divergenciaLocal = !esperadoAqui;
   const localEsperado = outrosLocais.length > 0 ? outrosLocais.map((l) => l.local).join(' | ') : null;
@@ -646,8 +653,10 @@ export async function registrarItemForaDoLugar(
       unidade: base.unidade,
       local: base.local,
       localCodigo: base.localCodigo,
-      quantidadeEsperada: base.quantidadeEsperada,
-      dataCopiaEstoque: base.dataCopiaEstoque ? new Date(base.dataCopiaEstoque) : null,
+      quantidadeEsperada: base.quantidadeDisponivel,
+      quantidadeTotal: base.quantidadeTotal,
+      quantidadeReservada: base.quantidadeReservada,
+      dataSaldo: new Date(),
       rua,
       predio,
       nivel,
@@ -851,11 +860,6 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
   }
 
-  let fotoChave: string | undefined;
-  if (input.foto) {
-    fotoChave = await uploadFotoContagem(item.id, numeroContagem, input.foto.buffer, input.foto.mimeType);
-  }
-
   const novoStatus: StatusContagemItem = item.divergenciaLocal
     ? 'DIVERGENCIA_LOCAL'
     : diferenca === 0
@@ -874,7 +878,6 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             conferidoPorId: input.conferidoPorId,
             dataConferencia: new Date(),
             status: novoStatus,
-            ...(fotoChave ? { fotoChaveArmazenamento: fotoChave } : {}),
           }
         : {
             quantidadeConferida2: input.quantidadeConferida,
@@ -885,7 +888,6 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             dataConferencia2: new Date(),
             segundaContagemSolicitada: false,
             status: novoStatus,
-            ...(fotoChave ? { fotoChaveArmazenamento2: fotoChave } : {}),
           },
   });
 
@@ -904,7 +906,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
       'FIM_CONTAGEM',
       item.id,
       numeroContagem === 1 ? 'Contagem concluída' : 'Recontagem concluída',
-      `${nome} contou ${item.descricao} (${item.local})${rotulo}: bateu com a cópia de estoque.`
+      `${nome} contou ${item.descricao} (${item.local})${rotulo}: bateu com o estoque disponível.`
     );
   } else {
     await criarNotificacao(
@@ -943,13 +945,6 @@ export async function solicitarSegundaContagemContagemItem(
     },
   });
   return montarContagemItemDTO(item);
-}
-
-export async function getFotoContagemItem(id: string, numeroContagem: number) {
-  const item = await prisma.contagemItem.findUnique({ where: { id } });
-  const chave = numeroContagem === 2 ? item?.fotoChaveArmazenamento2 : item?.fotoChaveArmazenamento;
-  if (!chave) return null;
-  return obterFotoStream(chave);
 }
 
 export interface IndicadoresContagemDTO {
@@ -1096,4 +1091,28 @@ export async function getProgressoContagemPorPredio(filial?: string | null): Pro
     if (a.rua !== b.rua) return (a.rua ?? 'zzz').localeCompare(b.rua ?? 'zzz');
     return (a.predio ?? 'zzz').localeCompare(b.predio ?? 'zzz');
   });
+}
+
+// ---------------------------------------------------------------------------
+// Reservas: quais pedidos prendem o item
+// ---------------------------------------------------------------------------
+
+export interface ReservaDoItemDTO {
+  quantidadeReservada: number;
+  pedidos: PedidoQueReserva[];
+}
+
+// O monitoramento mostra a quantidade reservada ao lado da contada; aqui o
+// admin abre o detalhe e vê de ONDE vem essa reserva. O total é recalculado
+// pela soma dos pedidos, não pelo valor gravado na atribuição: a reserva pode
+// ter mudado desde então, e o que importa nessa tela é o agora.
+export async function getReservaDoItem(itemId: string): Promise<ReservaDoItemDTO | null> {
+  const item = await prisma.contagemItem.findUnique({ where: { id: itemId } });
+  if (!item) return null;
+
+  const pedidos = await getPedidosQueReservam(item.codigoProduto, item.localCodigo, item.empresaCodigo);
+  return {
+    quantidadeReservada: pedidos.reduce((total, pedido) => total + pedido.quantidade, 0),
+    pedidos,
+  };
 }

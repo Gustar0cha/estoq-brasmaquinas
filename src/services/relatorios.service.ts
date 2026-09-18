@@ -1,8 +1,8 @@
 import ExcelJS from 'exceljs';
 
 import { prisma } from '../lib/prisma';
-import { ContagemItemDTO, getContagemItens, getFotoContagemItem } from './contagem.service';
-import { getFotoContagem, getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
+import { ContagemItemDTO, getContagemItens } from './contagem.service';
+import { getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
 import {
   chaveReserva,
   chaveSaldoItem,
@@ -37,19 +37,6 @@ function filtrarPorPeriodoEEmpresa(itens: ItemAgrupadoDTO[], filtro: FiltroRelat
   });
 }
 
-async function coletarBufferFoto(chave: string, numeroContagem: number): Promise<Buffer | null> {
-  try {
-    const stream = await getFotoContagem(chave, numeroContagem);
-    if (!stream) return null;
-    const partes: Buffer[] = [];
-    for await (const parte of stream) {
-      partes.push(parte as Buffer);
-    }
-    return Buffer.concat(partes);
-  } catch {
-    return null;
-  }
-}
 
 export async function gerarRelatorioExcel(filtro: FiltroRelatorio): Promise<ExcelJS.Buffer> {
   const itens = await getItensAgrupados({
@@ -75,8 +62,6 @@ export async function gerarRelatorioExcel(filtro: FiltroRelatorio): Promise<Exce
     { header: 'Qtd. 1ª Conferência', key: 'quantidadeConferida1', width: 18 },
     { header: 'Qtd. 2ª Conferência', key: 'quantidadeConferida2', width: 18 },
     { header: 'Motivo Divergência', key: 'motivo', width: 24 },
-    { header: 'Foto 1ª Contagem', key: 'foto1', width: 22 },
-    { header: 'Foto 2ª Contagem', key: 'foto2', width: 22 },
   ];
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -93,46 +78,11 @@ export async function gerarRelatorioExcel(filtro: FiltroRelatorio): Promise<Exce
       quantidadeConferida2: item.quantidadeConferida2 ?? '',
       motivo: item.motivo ?? '',
     });
-    linha.height = 70;
-
-    if (item.temFoto) {
-      const buffer = await coletarBufferFoto(item.chave, 1);
-      if (buffer) {
-        const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, {
-          tl: { col: 8, row: linha.number - 1 },
-          ext: { width: 90, height: 90 },
-        });
-      }
-    }
-    if (item.temFoto2) {
-      const buffer = await coletarBufferFoto(item.chave, 2);
-      if (buffer) {
-        const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, {
-          tl: { col: 9, row: linha.number - 1 },
-          ext: { width: 90, height: 90 },
-        });
-      }
-    }
   }
 
   return workbook.xlsx.writeBuffer();
 }
 
-async function coletarBufferFotoContagem(itemId: string, numeroContagem: number): Promise<Buffer | null> {
-  try {
-    const stream = await getFotoContagemItem(itemId, numeroContagem);
-    if (!stream) return null;
-    const partes: Buffer[] = [];
-    for await (const parte of stream) {
-      partes.push(parte as Buffer);
-    }
-    return Buffer.concat(partes);
-  } catch {
-    return null;
-  }
-}
 
 export interface FiltroRelatorioContagem {
   dataInicio?: Date;
@@ -187,8 +137,6 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
     { header: 'Resultado da Recontagem', key: 'resultadoRecontagem', width: 26 },
     { header: 'Motivo Divergência', key: 'motivo', width: 24 },
     { header: 'Motivo 2ª Contagem', key: 'motivo2', width: 24 },
-    { header: 'Foto 1ª Contagem', key: 'foto1', width: 22 },
-    { header: 'Foto 2ª Contagem', key: 'foto2', width: 22 },
   ];
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -217,22 +165,6 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
       motivo: item.motivo ?? '',
       motivo2: item.motivo2 ?? '',
     });
-    linha.height = 70;
-
-    if (item.temFoto) {
-      const buffer = await coletarBufferFotoContagem(item.id, 1);
-      if (buffer) {
-        const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 19, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
-      }
-    }
-    if (item.temFoto2) {
-      const buffer = await coletarBufferFotoContagem(item.id, 2);
-      if (buffer) {
-        const imageId = workbook.addImage({ base64: `data:image/jpeg;base64,${buffer.toString('base64')}`, extension: 'jpeg' });
-        sheet.addImage(imageId, { tl: { col: 20, row: linha.number - 1 }, ext: { width: 90, height: 90 } });
-      }
-    }
   }
 
   return workbook.xlsx.writeBuffer();
