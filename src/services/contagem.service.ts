@@ -1,4 +1,5 @@
 import { ehLocalPaiAgrupador } from '../lib/agrupadores';
+import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
   buscarProdutosSankhya,
@@ -90,6 +91,7 @@ export interface ContagemItemDTO {
   conferidoPorId?: string;
   codigoLocalBipado?: string;
   codigoProdutoBipado?: string;
+  temFoto?: boolean;
 
   // 2ª contagem — só existe se foi solicitada pelo gestor
   segundaContagemSolicitada: boolean;
@@ -103,6 +105,7 @@ export interface ContagemItemDTO {
   conferidoPor2Id?: string;
   codigoLocalBipado2?: string;
   codigoProdutoBipado2?: string;
+  temFoto2?: boolean;
 }
 
 export interface IniciarContagemItemInput {
@@ -118,6 +121,7 @@ export interface EnviarContagemItemInput {
   quantidadeConferida: number;
   motivo?: string;
   observacao?: string;
+  foto?: { buffer: Buffer; mimeType: string };
 }
 
 export interface FiltroContagemItens {
@@ -176,6 +180,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     conferidoPorId: item.conferidoPorId ?? undefined,
     codigoLocalBipado: item.codigoLocalBipado ?? undefined,
     codigoProdutoBipado: item.codigoProdutoBipado ?? undefined,
+    temFoto: Boolean(item.fotoChaveArmazenamento),
 
     segundaContagemSolicitada: item.segundaContagemSolicitada,
     segundaContagemAtribuidaPara: item.segundaContagemUsuarioId ?? null,
@@ -188,6 +193,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     conferidoPor2Id: item.conferidoPor2Id ?? undefined,
     codigoLocalBipado2: item.codigoLocalBipado2 ?? undefined,
     codigoProdutoBipado2: item.codigoProdutoBipado2 ?? undefined,
+    temFoto2: Boolean(item.fotoChaveArmazenamento2),
   };
 }
 
@@ -553,8 +559,8 @@ export async function reatribuirContagemPredio(
 export interface RemoverAtribuicaoPredioInput extends AlvoAtribuicaoPredio {
   removidoPorId: string;
   // true = limpeza total do prédio, incluindo o que já foi contado (a
-  // contagem some junto, sem volta). false/ausente = só tira da lista o que
-  // ninguém contou.
+  // contagem e a foto somem junto, sem volta). false/ausente = só tira da
+  // lista o que ninguém contou.
   incluirContados?: boolean;
 }
 
@@ -895,6 +901,11 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
   }
 
+  let fotoChave: string | undefined;
+  if (input.foto) {
+    fotoChave = await uploadFotoContagem(item.id, numeroContagem, input.foto.buffer, input.foto.mimeType);
+  }
+
   const novoStatus: StatusContagemItem = item.divergenciaLocal
     ? 'DIVERGENCIA_LOCAL'
     : diferenca === 0
@@ -913,6 +924,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             conferidoPorId: input.conferidoPorId,
             dataConferencia: new Date(),
             status: novoStatus,
+            ...(fotoChave ? { fotoChaveArmazenamento: fotoChave } : {}),
           }
         : {
             quantidadeConferida2: input.quantidadeConferida,
@@ -923,6 +935,7 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
             dataConferencia2: new Date(),
             segundaContagemSolicitada: false,
             status: novoStatus,
+            ...(fotoChave ? { fotoChaveArmazenamento2: fotoChave } : {}),
           },
   });
 
@@ -980,6 +993,13 @@ export async function solicitarSegundaContagemContagemItem(
     },
   });
   return montarContagemItemDTO(item);
+}
+
+export async function getFotoContagemItem(id: string, numeroContagem: number) {
+  const item = await prisma.contagemItem.findUnique({ where: { id } });
+  const chave = numeroContagem === 2 ? item?.fotoChaveArmazenamento2 : item?.fotoChaveArmazenamento;
+  if (!chave) return null;
+  return obterFotoStream(chave);
 }
 
 export interface IndicadoresContagemDTO {

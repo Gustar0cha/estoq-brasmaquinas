@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
@@ -8,6 +9,9 @@ import { TipoMovimentacaoSankhya } from '../sankhya/types';
 
 export const itemConferenciaRouter = Router();
 
+// Guarda a foto em memória (nunca em disco no servidor) e repassa direto
+// pro MinIO — 8MB cobre com folga uma foto de câmera de celular comprimida.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 itemConferenciaRouter.get('/', autenticar, async (req, res) => {
   const { tipo, status, atribuidoPara } = req.query;
@@ -41,6 +45,8 @@ itemConferenciaRouter.get('/:chave', autenticar, async (req, res) => {
   res.json(item);
 });
 
+// multipart/form-data — a foto (opcional) vem junto no mesmo request, campos
+// não-arquivo chegam como string em req.body mesmo os numéricos.
 const conferenciaItemSchema = z.object({
   quantidadeConferida: z.coerce.number(),
   motivo: z.string().optional(),
@@ -52,6 +58,7 @@ const conferenciaItemSchema = z.object({
 itemConferenciaRouter.post(
   '/:chave/conferencia',
   autenticar,
+  upload.single('foto'),
   async (req, res) => {
     const { chave } = req.params as { chave: string };
     const parse = conferenciaItemSchema.safeParse(req.body);
@@ -69,6 +76,7 @@ itemConferenciaRouter.post(
         observacao: parse.data.observacao,
         codigoLocalBipado: parse.data.codigoLocalBipado,
         codigoProdutoBipado: parse.data.codigoProdutoBipado,
+        foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
       });
       res.json({ ok: true, item });
     } catch (error) {
@@ -105,6 +113,30 @@ itemConferenciaRouter.post(
       return;
     }
     res.json(item);
+  }
+);
+
+// Nunca expõe a URL do MinIO nem as credenciais — o app só recebe o binário
+// da foto, e só admin pode pedir (o operador que tirou a foto não vê ela de
+// volta em lugar nenhum).
+itemConferenciaRouter.get(
+  '/:chave/foto/:numeroContagem',
+  autenticar,
+  exigirAdmin,
+  async (req, res) => {
+    const { chave, numeroContagem } = req.params as { chave: string; numeroContagem: string };
+
+    try {
+      const stream = await itemConferenciaService.getFotoContagem(chave, Number(numeroContagem));
+      if (!stream) {
+        res.status(404).json({ erro: 'Foto não encontrada.' });
+        return;
+      }
+      res.setHeader('Content-Type', 'image/jpeg');
+      stream.pipe(res);
+    } catch {
+      res.status(404).json({ erro: 'Foto não encontrada.' });
+    }
   }
 );
 

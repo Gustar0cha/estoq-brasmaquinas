@@ -152,6 +152,9 @@ model ItemConferenciaResultado {
   // produtos nesse ambiente, então não há o que validar contra).
   codigoLocalBipado    String?
   codigoProdutoBipado  String?
+  // Mesma regra da contagem física: chave do objeto no MinIO, servida só
+  // pelo proxy autenticado da API.
+  fotoChaveArmazenamento String?
 
   @@unique([chave, numeroContagem])
   @@map("item_conferencia_resultados")
@@ -315,6 +318,10 @@ model ContagemItem {
   conferidoPorId         String?
   codigoLocalBipado      String?
   codigoProdutoBipado    String?
+  // Chave do objeto no MinIO (nunca uma URL pública) — a foto só é servida
+  // via proxy autenticado da nossa API, o app não recebe acesso direto ao
+  // bucket nem essa foto aparece em nenhuma tela do operador.
+  fotoChaveArmazenamento String?
 
   // pedido de 2ª contagem
   segundaContagemSolicitada      Boolean  @default(false)
@@ -334,6 +341,7 @@ model ContagemItem {
   conferidoPor2Id         String?
   codigoLocalBipado2      String?
   codigoProdutoBipado2    String?
+  fotoChaveArmazenamento2 String?
 
   @@map("contagem_itens")
 }

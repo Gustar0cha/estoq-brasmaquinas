@@ -12,7 +12,7 @@ import { TipoMovimentacaoSankhya } from '../sankhya/types';
 export const relatoriosRouter = Router();
 
 relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req, res) => {
-  const { dataInicio, dataFim, empresaCodigo, tipo, status, atribuidoPara, somenteDivergencias } =
+  const { dataInicio, dataFim, empresaCodigo, tipo, status, atribuidoPara, somenteDivergencias, incluirFotos } =
     req.query;
 
   try {
@@ -24,6 +24,7 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
       status: typeof status === 'string' ? (status as StatusConferencia) : undefined,
       atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
       somenteDivergencias: somenteDivergencias === 'true',
+      incluirFotos: incluirFotos === 'true',
     });
 
     const nomeArquivo = somenteDivergencias === 'true' ? 'divergencias.xlsx' : 'movimentacoes.xlsx';
@@ -41,13 +42,14 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
 });
 
 relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res) => {
-  const { dataInicio, dataFim, somenteDivergencias } = req.query;
+  const { dataInicio, dataFim, somenteDivergencias, incluirFotos } = req.query;
 
   try {
     const buffer = await gerarRelatorioContagemExcel({
       dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
       dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
       somenteDivergencias: somenteDivergencias === 'true',
+      incluirFotos: incluirFotos === 'true',
     });
     const nomeArquivo = somenteDivergencias === 'true' ? 'contagem-divergencias.xlsx' : 'contagem.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

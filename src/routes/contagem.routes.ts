@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma';
@@ -6,6 +7,10 @@ import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as contagemService from '../services/contagem.service';
 import { StatusContagemItem } from '../services/contagem.service';
 
+
+// Guarda a foto em memória (nunca em disco no servidor) e repassa direto
+// pro MinIO — 8MB cobre com folga uma foto de câmera de celular comprimida.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 export const contagemRouter = Router();
 export const contagemItensRouter = Router();
@@ -274,7 +279,7 @@ const conferenciaContagemSchema = z.object({
   observacao: z.string().optional(),
 });
 
-contagemItensRouter.post('/:id/conferencia', autenticar, async (req, res) => {
+contagemItensRouter.post('/:id/conferencia', autenticar, upload.single('foto'), async (req, res) => {
   const { id } = req.params as { id: string };
   const parse = conferenciaContagemSchema.safeParse(req.body);
   if (!parse.success) {
@@ -289,6 +294,7 @@ contagemItensRouter.post('/:id/conferencia', autenticar, async (req, res) => {
       quantidadeConferida: parse.data.quantidadeConferida,
       motivo: parse.data.motivo,
       observacao: parse.data.observacao,
+      foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
     });
     res.json({ ok: true, item });
   } catch (error) {
@@ -316,6 +322,24 @@ contagemItensRouter.post('/:id/solicitar-segunda-contagem', autenticar, exigirAd
     return;
   }
   res.json(item);
+});
+
+// Nunca expõe a URL do MinIO nem as credenciais — o app só recebe o binário
+// da foto, e só admin pode pedir (quem tirou não vê de volta em lugar nenhum).
+contagemItensRouter.get('/:id/foto/:numeroContagem', autenticar, exigirAdmin, async (req, res) => {
+  const { id, numeroContagem } = req.params as { id: string; numeroContagem: string };
+
+  try {
+    const stream = await contagemService.getFotoContagemItem(id, Number(numeroContagem));
+    if (!stream) {
+      res.status(404).json({ erro: 'Foto não encontrada.' });
+      return;
+    }
+    res.setHeader('Content-Type', 'image/jpeg');
+    stream.pipe(res);
+  } catch {
+    res.status(404).json({ erro: 'Foto não encontrada.' });
+  }
 });
 
 const comentarioSchema = z.object({

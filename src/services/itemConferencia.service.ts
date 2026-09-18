@@ -1,3 +1,4 @@
+import { uploadFotoContagem, obterFotoStream, removerFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import { getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
@@ -36,6 +37,7 @@ export interface ItemAgrupadoDTO {
   conferidoPorId?: string;
   codigoLocalBipado?: string;
   codigoProdutoBipado?: string;
+  temFoto?: boolean;
 
   // 2ª contagem — só existe se foi solicitada pelo gestor
   segundaContagemSolicitada: boolean;
@@ -48,6 +50,7 @@ export interface ItemAgrupadoDTO {
   conferidoPor2Id?: string;
   codigoLocalBipado2?: string;
   codigoProdutoBipado2?: string;
+  temFoto2?: boolean;
 }
 
 export interface FiltroItensAgrupados {
@@ -64,6 +67,7 @@ export interface EnviarConferenciaItemInput {
   observacao?: string;
   codigoLocalBipado?: string;
   codigoProdutoBipado?: string;
+  foto?: { buffer: Buffer; mimeType: string };
 }
 
 function montarChave(empresaCodigo: string, codigoProduto: string, localCodigo: string): string {
@@ -193,6 +197,7 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       conferidoPorId: contagem1?.conferidoPorId,
       codigoLocalBipado: contagem1?.codigoLocalBipado ?? undefined,
       codigoProdutoBipado: contagem1?.codigoProdutoBipado ?? undefined,
+      temFoto: Boolean(contagem1?.fotoChaveArmazenamento),
 
       segundaContagemSolicitada: Boolean(solicitacao),
       segundaContagemAtribuidaPara: solicitacao?.usuarioId ?? null,
@@ -204,6 +209,7 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       conferidoPor2Id: contagem2?.conferidoPorId,
       codigoLocalBipado2: contagem2?.codigoLocalBipado ?? undefined,
       codigoProdutoBipado2: contagem2?.codigoProdutoBipado ?? undefined,
+      temFoto2: Boolean(contagem2?.fotoChaveArmazenamento),
     };
   });
 }
@@ -275,6 +281,16 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
     throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
   }
 
+  let fotoChaveArmazenamento: string | undefined;
+  if (input.foto) {
+    fotoChaveArmazenamento = await uploadFotoContagem(
+      input.chave,
+      numeroContagem,
+      input.foto.buffer,
+      input.foto.mimeType
+    );
+  }
+
   await prisma.itemConferenciaResultado.upsert({
     where: { chave_numeroContagem: { chave: input.chave, numeroContagem } },
     create: {
@@ -294,6 +310,7 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
       observacao: input.observacao,
       codigoLocalBipado: input.codigoLocalBipado,
       codigoProdutoBipado: input.codigoProdutoBipado,
+      fotoChaveArmazenamento,
     },
     update: {
       quantidadeConferida: input.quantidadeConferida,
@@ -304,6 +321,7 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
       observacao: input.observacao ?? null,
       codigoLocalBipado: input.codigoLocalBipado ?? null,
       codigoProdutoBipado: input.codigoProdutoBipado ?? null,
+      ...(fotoChaveArmazenamento ? { fotoChaveArmazenamento } : {}),
     },
   });
 
@@ -363,6 +381,9 @@ export async function apagarContagemItem(
   });
   if (!contagem) return getItemAgrupado(chave);
 
+  if (contagem.fotoChaveArmazenamento) {
+    await removerFotoContagem(contagem.fotoChaveArmazenamento).catch(() => {});
+  }
   await prisma.itemConferenciaResultado.delete({
     where: { chave_numeroContagem: { chave, numeroContagem } },
   });
@@ -371,11 +392,22 @@ export async function apagarContagemItem(
     const contagem2 = await prisma.itemConferenciaResultado.findUnique({
       where: { chave_numeroContagem: { chave, numeroContagem: 2 } },
     });
+    if (contagem2?.fotoChaveArmazenamento) {
+      await removerFotoContagem(contagem2.fotoChaveArmazenamento).catch(() => {});
+    }
     await prisma.itemConferenciaResultado.deleteMany({ where: { chave, numeroContagem: 2 } });
     await prisma.itemSolicitacaoSegundaContagem.delete({ where: { chave } }).catch(() => {});
   }
 
   return getItemAgrupado(chave);
+}
+
+export async function getFotoContagem(chave: string, numeroContagem: number) {
+  const resultado = await prisma.itemConferenciaResultado.findUnique({
+    where: { chave_numeroContagem: { chave, numeroContagem } },
+  });
+  if (!resultado?.fotoChaveArmazenamento) return null;
+  return obterFotoStream(resultado.fotoChaveArmazenamento);
 }
 
 export interface IndicadoresDTO {
@@ -415,11 +447,13 @@ export interface DivergenciaItemDTO {
   motivo: string;
   observacao?: string;
   comentarioAdmin?: string;
+  temFoto?: boolean;
   segundaContagemSolicitada: boolean;
   segundaContagemAtribuidaPara?: string | null;
   quantidadeConferida2?: number;
   diferenca2?: number;
   motivo2?: string;
+  temFoto2?: boolean;
   notasOrigem: NotaOrigemDTO[];
 }
 
@@ -438,11 +472,13 @@ export async function getDivergenciasItens(): Promise<DivergenciaItemDTO[]> {
     motivo: item.motivo ?? '',
     observacao: item.observacao,
     comentarioAdmin: item.comentarioAdmin,
+    temFoto: item.temFoto,
     segundaContagemSolicitada: item.segundaContagemSolicitada,
     segundaContagemAtribuidaPara: item.segundaContagemAtribuidaPara,
     quantidadeConferida2: item.quantidadeConferida2,
     diferenca2: item.diferenca2,
     motivo2: item.motivo2,
+    temFoto2: item.temFoto2,
     notasOrigem: item.notasOrigem,
   }));
 }
