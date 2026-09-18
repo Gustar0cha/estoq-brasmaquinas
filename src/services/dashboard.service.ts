@@ -61,6 +61,41 @@ export interface PredioDashboard {
   divergencias: number;
 }
 
+// Painel de acuracidade: mede a qualidade da contagem, não o andamento.
+// Física = quantos SKUs bateram; financeira = quanto do dinheiro bateu. As
+// duas juntas porque um erro num item caro e um num item barato pesam igual
+// na física e muito diferente na financeira.
+export interface AcuracidadeDashboard {
+  acuraciaFisica: number;
+  acuraciaFinanceira: number;
+  metaFisica: number;
+  metaFinanceira: number;
+  faltas: { skus: number; quantidade: number; custo: number };
+  sobras: { skus: number; quantidade: number; custo: number };
+  reservados: { itens: number; quantidade: number; valor: number };
+  topDivergenciaFinanceira: { descricao: string; local: string; valor: number }[];
+  topDivergenciaFisica: { descricao: string; local: string; quantidade: number }[];
+}
+
+// Planta esquemática do estoque, montada a partir dos próprios dados (uma
+// faixa por rua, um bloco por prédio) — não é a planta real do galpão, que o
+// sistema não conhece. Serve pra ver de longe o que já fechou e o que falta.
+export interface RuaMapa {
+  rua: string | null;
+  total: number;
+  contados: number;
+  pendentes: number;
+  emAndamento: number;
+  divergencias: number;
+  predios: {
+    predio: string | null;
+    total: number;
+    contados: number;
+    emAndamento: number;
+    divergencias: number;
+  }[];
+}
+
 export interface DashboardContagem {
   modo: ModoDashboard;
   periodo: { inicio: string | null; fim: string | null };
@@ -101,6 +136,8 @@ export interface DashboardContagem {
   porDia: DiaDashboard[];
   grupos: GrupoDashboard[];
   predios: PredioDashboard[];
+  acuracidade: AcuracidadeDashboard;
+  mapa: RuaMapa[];
   operadoresAtivos: number;
 }
 
@@ -111,6 +148,9 @@ interface ItemDashboard {
   id: string;
   empresaCodigo: string;
   codigoProduto: string;
+  descricao: string;
+  local: string;
+  quantidadeReservada: number;
   status: string;
   rua: string | null;
   predio: string | null;
@@ -165,6 +205,9 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
       id: true,
       empresaCodigo: true,
       codigoProduto: true,
+      descricao: true,
+      local: true,
+      quantidadeReservada: true,
       status: true,
       rua: true,
       predio: true,
@@ -222,6 +265,21 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
     aContar: 0,
   };
 
+  const acuracidade: AcuracidadeDashboard = {
+    acuraciaFisica: 0,
+    acuraciaFinanceira: 0,
+    // Metas da operação: 98% dos SKUs e 99% do valor.
+    metaFisica: 98,
+    metaFinanceira: 99,
+    faltas: { skus: 0, quantidade: 0, custo: 0 },
+    sobras: { skus: 0, quantidade: 0, custo: 0 },
+    reservados: { itens: 0, quantidade: 0, valor: 0 },
+    topDivergenciaFinanceira: [],
+    topDivergenciaFisica: [],
+  };
+  const divergentesDetalhe: { descricao: string; local: string; valor: number; quantidade: number }[] = [];
+  const porRua = new Map<string, RuaMapa>();
+
   const porUsuario = new Map<string, RankingUsuarioDashboard>();
   const porDia = new Map<string, DiaDashboard>();
   const porGrupo = new Map<string, GrupoDashboard>();
@@ -243,6 +301,12 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
 
     valores.esperado += item.quantidadeEsperada * custo;
 
+    if (item.quantidadeReservada > 0) {
+      acuracidade.reservados.itens += 1;
+      acuracidade.reservados.quantidade += item.quantidadeReservada;
+      acuracidade.reservados.valor += item.quantidadeReservada * custo;
+    }
+
     if (!contado) {
       valores.aContar += item.quantidadeEsperada * custo;
     } else {
@@ -254,6 +318,24 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
       valores.divergenciaAbsoluta += Math.abs(diferenca) * custo;
       if (diferenca > 0) valores.sobra += diferenca * custo;
       if (diferenca < 0) valores.falta += Math.abs(diferenca) * custo;
+
+      if (diferenca > 0) {
+        acuracidade.sobras.skus += 1;
+        acuracidade.sobras.quantidade += diferenca;
+        acuracidade.sobras.custo += diferenca * custo;
+      } else if (diferenca < 0) {
+        acuracidade.faltas.skus += 1;
+        acuracidade.faltas.quantidade += Math.abs(diferenca);
+        acuracidade.faltas.custo += Math.abs(diferenca) * custo;
+      }
+      if (diferenca !== 0) {
+        divergentesDetalhe.push({
+          descricao: item.descricao,
+          local: item.local,
+          valor: Math.abs(diferenca) * custo,
+          quantidade: Math.abs(diferenca),
+        });
+      }
 
       // --- por dia ---
       const data = dataFinal(item);
@@ -333,6 +415,36 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
     else predio.pendentes += 1;
     if (divergente) predio.divergencias += 1;
     porPredio.set(chavePredio, predio);
+
+    // --- mapa (rua → prédios) ---
+    const chaveRua = item.rua ?? '?';
+    const rua = porRua.get(chaveRua) ?? {
+      rua: item.rua,
+      total: 0,
+      contados: 0,
+      pendentes: 0,
+      emAndamento: 0,
+      divergencias: 0,
+      predios: [],
+    };
+    rua.total += 1;
+    if (contado) rua.contados += 1;
+    else rua.pendentes += 1;
+    if (item.status === 'EM_ANDAMENTO' || item.status === 'SEGUNDA_EM_ANDAMENTO') rua.emAndamento += 1;
+    if (divergente) rua.divergencias += 1;
+
+    let blocoPredio = rua.predios.find((b) => b.predio === item.predio);
+    if (!blocoPredio) {
+      blocoPredio = { predio: item.predio, total: 0, contados: 0, emAndamento: 0, divergencias: 0 };
+      rua.predios.push(blocoPredio);
+    }
+    blocoPredio.total += 1;
+    if (contado) blocoPredio.contados += 1;
+    if (item.status === 'EM_ANDAMENTO' || item.status === 'SEGUNDA_EM_ANDAMENTO') {
+      blocoPredio.emAndamento += 1;
+    }
+    if (divergente) blocoPredio.divergencias += 1;
+    porRua.set(chaveRua, rua);
   }
 
   totais.percentualConcluido =
@@ -341,6 +453,38 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
     totais.contados > 0
       ? Math.round(((totais.contados - totais.divergencias) / totais.contados) * 100)
       : 0;
+
+  acuracidade.acuraciaFisica = totais.acuracia;
+  // Financeira: quanto do valor esperado do que foi contado bateu. Usa o
+  // esperado como base (não o contado) porque é contra ele que a diferença é
+  // medida — com base no contado, uma falta grande inflaria a porcentagem.
+  const valorBaseContado = valores.contado + valores.falta - valores.sobra;
+  acuracidade.acuraciaFinanceira =
+    valorBaseContado > 0
+      ? Math.max(
+          0,
+          Math.round(((valorBaseContado - valores.divergenciaAbsoluta) / valorBaseContado) * 1000) / 10
+        )
+      : 0;
+
+  acuracidade.topDivergenciaFinanceira = [...divergentesDetalhe]
+    .sort((a, b) => b.valor - a.valor)
+    .slice(0, 10)
+    .map(({ descricao, local, valor }) => ({ descricao, local, valor }));
+  acuracidade.topDivergenciaFisica = [...divergentesDetalhe]
+    .sort((a, b) => b.quantidade - a.quantidade)
+    .slice(0, 10)
+    .map(({ descricao, local, quantidade }) => ({ descricao, local, quantidade }));
+
+  // Ruas em ordem natural (Rua 2 antes de Rua 10), prédios idem.
+  const mapa = [...porRua.values()].sort((a, b) =>
+    (a.rua ?? 'zzz').localeCompare(b.rua ?? 'zzz', 'pt-BR', { numeric: true })
+  );
+  for (const rua of mapa) {
+    rua.predios.sort((a, b) =>
+      (a.predio ?? 'zzz').localeCompare(b.predio ?? 'zzz', 'pt-BR', { numeric: true })
+    );
+  }
 
   const ranking = [...porUsuario.values()]
     .map((pessoa) => ({
@@ -369,6 +513,8 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
       .filter((g) => g.divergencias > 0)
       .sort((a, b) => b.valorDivergencia - a.valorDivergencia)
       .slice(0, 8),
+    acuracidade,
+    mapa,
     predios: [...porPredio.values()].sort((a, b) => b.total - a.total),
     operadoresAtivos: ranking.filter((p) => p.pendentes > 0).length,
   };
