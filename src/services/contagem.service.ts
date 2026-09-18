@@ -296,6 +296,10 @@ export async function getPrediosDisponiveis(
 export interface AtribuirContagemPredioInput {
   rua: string | null;
   predio: string | null;
+  // Recorte por marca e/ou grupo de produto do Sankhya: atribui só os itens
+  // que casam com o filtro que o admin está vendo na tela. Vazio = tudo.
+  marcas?: string[];
+  grupos?: string[];
   // Opcional: atribui só um nível do prédio. undefined = prédio inteiro;
   // null = só os locais do prédio que não trazem nível no nome.
   nivel?: string | null;
@@ -349,12 +353,12 @@ export async function atribuirContagemPredio(
     input.empresaCodigo
   );
 
-  const existentes = await prisma.contagemItem.findMany({
-    where: { empresaCodigo: input.empresaCodigo, status: { in: STATUS_ABERTOS } },
-    select: { codigoProduto: true, localCodigo: true },
-  });
-  const chavesExistentes = new Set(existentes.map((e) => `${e.codigoProduto}|${e.localCodigo}`));
-  const novos = itensComSaldo.filter((i) => !chavesExistentes.has(`${i.codigoProduto}|${i.localCodigo}`));
+  const filtrados = filtrarPorMarcaEGrupo(itensComSaldo, input.marcas, input.grupos);
+  if (filtrados.length === 0) {
+    throw new Error('Nenhum item com saldo bate com esse filtro de marca/grupo.');
+  }
+
+  const novos = await somenteForaDeContagemAberta(filtrados, input.empresaCodigo);
 
   if (novos.length === 0) {
     return { criados: 0 };
@@ -405,6 +409,37 @@ export async function atribuirContagemPredio(
 // ser repassados ou removidos sem jogar trabalho fora. Um item já conferido
 // (ou em 2ª contagem) fica onde está, com quem contou.
 const STATUS_SEM_CONTAGEM: StatusContagemItem[] = ['PENDENTE', 'EM_ANDAMENTO'];
+
+// Recorte por marca/grupo: listas vazias (ou ausentes) não filtram nada.
+function filtrarPorMarcaEGrupo<T extends { marca: string | null; grupoCodigo: string | null }>(
+  itens: T[],
+  marcas?: string[],
+  grupos?: string[]
+): T[] {
+  const porMarca = marcas && marcas.length > 0 ? new Set(marcas) : null;
+  const porGrupo = grupos && grupos.length > 0 ? new Set(grupos) : null;
+  if (!porMarca && !porGrupo) return itens;
+
+  return itens.filter(
+    (item) =>
+      (!porMarca || (item.marca !== null && porMarca.has(item.marca))) &&
+      (!porGrupo || (item.grupoCodigo !== null && porGrupo.has(item.grupoCodigo)))
+  );
+}
+
+// Atribuir é idempotente: produto+local que já está numa contagem aberta não
+// entra de novo, senão o mesmo item apareceria duas vezes pra contar.
+async function somenteForaDeContagemAberta<T extends { codigoProduto: string; localCodigo: string }>(
+  itens: T[],
+  empresaCodigo: string
+): Promise<T[]> {
+  const existentes = await prisma.contagemItem.findMany({
+    where: { empresaCodigo, status: { in: STATUS_ABERTOS } },
+    select: { codigoProduto: true, localCodigo: true },
+  });
+  const abertos = new Set(existentes.map((e) => `${e.codigoProduto}|${e.localCodigo}`));
+  return itens.filter((i) => !abertos.has(`${i.codigoProduto}|${i.localCodigo}`));
+}
 
 export interface AlvoAtribuicaoPredio {
   rua: string | null;
@@ -1115,4 +1150,169 @@ export async function getReservaDoItem(itemId: string): Promise<ReservaDoItemDTO
     quantidadeReservada: pedidos.reduce((total, pedido) => total + pedido.quantidade, 0),
     pedidos,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Atribuição item a item (e o catálogo de marcas/grupos pra filtrar)
+// ---------------------------------------------------------------------------
+
+export interface ItemDisponivelDTO {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  localCodigo: string;
+  local: string;
+  nivel: string | null;
+  marca: string | null;
+  grupoCodigo: string | null;
+  grupo: string | null;
+  quantidadeTotal: number;
+  quantidadeReservada: number;
+  quantidadeDisponivel: number;
+  // Já está numa contagem aberta — atribuir de novo não faria nada.
+  emContagem: boolean;
+}
+
+export interface ItensDisponiveisDTO {
+  itens: ItemDisponivelDTO[];
+  // O que existe de fato NESSE prédio, pra montar os filtros da tela sem
+  // oferecer marca/grupo que não tem item aqui.
+  marcas: string[];
+  grupos: { codigo: string; nome: string }[];
+}
+
+// Os itens de um prédio (ou de um nível dele), um a um — é o que a tela de
+// atribuições do painel lista pra o admin escolher o que mandar contar.
+export async function getItensDisponiveis(filtro: {
+  empresaCodigo: string;
+  rua: string | null;
+  predio: string | null;
+  nivel?: string | null;
+}): Promise<ItensDisponiveisDTO> {
+  const predios = await getPrediosDisponiveis(filtro.empresaCodigo);
+  const grupo = predios.find((p) => p.rua === filtro.rua && p.predio === filtro.predio);
+  if (!grupo) return { itens: [], marcas: [], grupos: [] };
+
+  const locaisAlvo =
+    filtro.nivel === undefined ? grupo.locais : grupo.locais.filter((l) => l.nivel === filtro.nivel);
+  const nivelPorLocal = new Map(grupo.locais.map((l) => [l.localCodigo, l.nivel]));
+
+  const comSaldo = await getItensComSaldoPorLocais(
+    locaisAlvo.map((l) => l.localCodigo),
+    filtro.empresaCodigo
+  );
+
+  const abertos = await prisma.contagemItem.findMany({
+    where: { empresaCodigo: filtro.empresaCodigo, status: { in: STATUS_ABERTOS } },
+    select: { codigoProduto: true, localCodigo: true },
+  });
+  const chavesAbertas = new Set(abertos.map((a) => `${a.codigoProduto}|${a.localCodigo}`));
+
+  const itens: ItemDisponivelDTO[] = comSaldo.map((i) => ({
+    codigoProduto: i.codigoProduto,
+    descricao: i.descricao,
+    unidade: i.unidade,
+    localCodigo: i.localCodigo,
+    local: i.local,
+    nivel: nivelPorLocal.get(i.localCodigo) ?? null,
+    marca: i.marca,
+    grupoCodigo: i.grupoCodigo,
+    grupo: i.grupo,
+    quantidadeTotal: i.quantidadeTotal,
+    quantidadeReservada: i.quantidadeReservada,
+    quantidadeDisponivel: i.quantidadeDisponivel,
+    emContagem: chavesAbertas.has(`${i.codigoProduto}|${i.localCodigo}`),
+  }));
+
+  const marcas = [...new Set(itens.map((i) => i.marca).filter((m): m is string => !!m))].sort(
+    (a, b) => a.localeCompare(b, 'pt-BR')
+  );
+  const gruposMapa = new Map<string, string>();
+  for (const item of itens) {
+    if (item.grupoCodigo) gruposMapa.set(item.grupoCodigo, item.grupo ?? item.grupoCodigo);
+  }
+  const grupos = [...gruposMapa.entries()]
+    .map(([codigo, nome]) => ({ codigo, nome }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+
+  return { itens, marcas, grupos };
+}
+
+export interface AtribuirContagemItensInput {
+  empresaCodigo: string;
+  itens: { codigoProduto: string; localCodigo: string }[];
+  atribuidoParaId: string;
+  atribuidoPorId: string;
+}
+
+// Atribui uma seleção avulsa de itens, sem precisar mandar o prédio inteiro.
+// Rua/prédio/nível de cada um saem do local, do mesmo jeito que na atribuição
+// por prédio — o agrupamento da contagem continua valendo.
+export async function atribuirContagemItens(
+  input: AtribuirContagemItensInput
+): Promise<{ criados: number }> {
+  if (input.itens.length === 0) throw new Error('Escolha ao menos um item pra atribuir.');
+
+  const locais = [...new Set(input.itens.map((i) => i.localCodigo))];
+  const comSaldo = await getItensComSaldoPorLocais(locais, input.empresaCodigo);
+
+  const pedidos = new Set(input.itens.map((i) => `${i.codigoProduto}|${i.localCodigo}`));
+  const escolhidos = comSaldo.filter((i) => pedidos.has(`${i.codigoProduto}|${i.localCodigo}`));
+  if (escolhidos.length === 0) {
+    throw new Error('Nenhum dos itens escolhidos tem saldo em estoque agora.');
+  }
+
+  // Ninguém recebe prateleira de outra loja — mesma regra da atribuição por
+  // prédio, conferida aqui local a local porque a seleção pode misturar.
+  for (const filial of new Set(escolhidos.map((i) => filialDoLocal(i.localCodigo)))) {
+    await exigirFilialCompativel(input.atribuidoParaId, filial);
+  }
+
+  const novos = await somenteForaDeContagemAberta(escolhidos, input.empresaCodigo);
+  if (novos.length === 0) return { criados: 0 };
+
+  const paisPorLocal = new Map<string, Awaited<ReturnType<typeof getPaiDoLocal>>>();
+  for (const localCodigo of new Set(novos.map((i) => i.localCodigo))) {
+    paisPorLocal.set(localCodigo, await getPaiDoLocal(localCodigo));
+  }
+
+  await prisma.contagemItem.createMany({
+    data: novos.map((i) => {
+      const { rua, predio, nivel } = resolverLocalizacao(
+        i.local,
+        paisPorLocal.get(i.localCodigo) ?? null,
+        ehLocalPaiAgrupador
+      );
+      return {
+        empresaCodigo: i.empresaCodigo,
+        empresaNome: i.empresaNome,
+        codigoProduto: i.codigoProduto,
+        descricao: i.descricao,
+        unidade: i.unidade,
+        local: i.local,
+        localCodigo: i.localCodigo,
+        quantidadeEsperada: i.quantidadeDisponivel,
+        quantidadeTotal: i.quantidadeTotal,
+        quantidadeReservada: i.quantidadeReservada,
+        dataSaldo: new Date(),
+        status: 'PENDENTE',
+        rua,
+        predio,
+        nivel,
+        atribuidoParaId: input.atribuidoParaId,
+        atribuidoPorId: input.atribuidoPorId,
+      };
+    }),
+  });
+
+  const nomeAdmin = await nomeUsuario(input.atribuidoPorId);
+  await notificarUsuario(
+    'ATRIBUICAO_CONTAGEM',
+    `${input.empresaCodigo}|itens`,
+    'Nova contagem atribuída',
+    `${nomeAdmin} atribuiu ${novos.length} ite${novos.length === 1 ? 'm' : 'ns'} pra você contar.`,
+    input.atribuidoParaId
+  );
+
+  return { criados: novos.length };
 }

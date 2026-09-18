@@ -61,6 +61,9 @@ const atribuirContagemSchema = z.object({
   filial: z.string().nullable().optional(),
   empresaCodigo: z.string().min(1),
   atribuidoParaId: z.string().min(1),
+  // Recorte por marca/grupo do Sankhya; ausente ou vazio = sem recorte.
+  marcas: z.array(z.string()).optional(),
+  grupos: z.array(z.string()).optional(),
 });
 
 contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
@@ -351,5 +354,73 @@ contagemItensRouter.get('/:id/reserva', autenticar, exigirAdmin, async (req, res
     res.status(502).json({
       erro: error instanceof Error ? error.message : 'Não foi possível consultar os pedidos no Sankhya.',
     });
+  }
+});
+
+const itensDisponiveisSchema = z.object({
+  empresaCodigo: z.string().min(1),
+  rua: z.string().nullable().optional(),
+  predio: z.string().nullable().optional(),
+  nivel: z.string().nullable().optional(),
+});
+
+// Os itens de um prédio, um a um — a tela de atribuições lista isso pra o
+// admin escolher o que mandar contar em vez do prédio inteiro.
+contagemRouter.get('/itens-disponiveis', autenticar, exigirAdmin, async (req, res) => {
+  const bruto = req.query as Record<string, unknown>;
+  const parse = itensDisponiveisSchema.safeParse({
+    empresaCodigo: bruto.empresaCodigo,
+    rua: bruto.rua === '' ? null : bruto.rua,
+    predio: bruto.predio === '' ? null : bruto.predio,
+    // Diferente de propósito: ausente = prédio inteiro, vazio = os locais
+    // desse prédio que não trazem nível no nome.
+    ...('nivel' in bruto ? { nivel: bruto.nivel === '' ? null : bruto.nivel } : {}),
+  });
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Filtro inválido.' });
+    return;
+  }
+
+  try {
+    res.json(
+      await contagemService.getItensDisponiveis({
+        empresaCodigo: parse.data.empresaCodigo,
+        rua: parse.data.rua ?? null,
+        predio: parse.data.predio ?? null,
+        ...('nivel' in bruto ? { nivel: parse.data.nivel ?? null } : {}),
+      })
+    );
+  } catch (error) {
+    res.status(502).json({
+      erro: error instanceof Error ? error.message : 'Não foi possível consultar o estoque.',
+    });
+  }
+});
+
+const atribuirItensSchema = z.object({
+  empresaCodigo: z.string().min(1),
+  itens: z
+    .array(z.object({ codigoProduto: z.string().min(1), localCodigo: z.string().min(1) }))
+    .min(1),
+  atribuidoParaId: z.string().min(1),
+});
+
+contagemRouter.post('/atribuir-itens', autenticar, exigirAdmin, async (req, res) => {
+  const parse = atribuirItensSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    const resultado = await contagemService.atribuirContagemItens({
+      ...parse.data,
+      atribuidoPorId: req.usuario!.sub,
+    });
+    res.status(201).json(resultado);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível atribuir os itens.' });
   }
 });
