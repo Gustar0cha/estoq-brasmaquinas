@@ -31,6 +31,7 @@ import {
   prefixoDaFilial,
   PREFIXOS_DE_LOJA,
 } from '../lib/filiais';
+import { garantirCicloAberto } from './ciclo.service';
 import { criarNotificacao, notificarUsuario } from './notificacao.service';
 
 // DIVERGENCIA_LOCAL = o produto foi contado numa prateleira diferente da que
@@ -64,6 +65,7 @@ export interface ContagemItemDTO {
   localCodigo: string;
   // Conferida contra o DISPONÍVEL (total - reservado): o item reservado já
   // foi separado pra um pedido e não deveria mais estar na prateleira.
+  cicloId: string | null;
   quantidadeEsperada: number;
   quantidadeTotal: number | null;
   quantidadeReservada: number;
@@ -129,6 +131,8 @@ export interface FiltroContagemItens {
   atribuidoPara?: string;
   dataInicio?: Date;
   dataFim?: Date;
+  // Inventário. Ausente = todos.
+  cicloId?: string;
   // Loja de quem está pedindo: esconde da lista os locais das outras lojas
   // (o prefixo do CODLOCAL é que diz a filial — ver src/lib/filiais.ts).
   filial?: string | null;
@@ -154,6 +158,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     unidade: item.unidade,
     local: item.local,
     localCodigo: item.localCodigo,
+    cicloId: item.cicloId ?? null,
     quantidadeEsperada: item.quantidadeEsperada,
     quantidadeTotal: item.quantidadeTotal ?? null,
     quantidadeReservada: item.quantidadeReservada ?? 0,
@@ -370,8 +375,11 @@ export async function atribuirContagemPredio(
     return { criados: 0 };
   }
 
+  const ciclo = await garantirCicloAberto(input.atribuidoPorId);
+
   await prisma.contagemItem.createMany({
     data: novos.map((i) => ({
+      cicloId: ciclo.id,
       empresaCodigo: i.empresaCodigo,
       empresaNome: i.empresaNome,
       codigoProduto: i.codigoProduto,
@@ -685,8 +693,11 @@ export async function registrarItemForaDoLugar(
     ehLocalPaiAgrupador
   );
 
+  const cicloDoItem = await garantirCicloAberto(input.usuarioId);
+
   const criado = await prisma.contagemItem.create({
     data: {
+      cicloId: cicloDoItem.id,
       empresaCodigo: base.empresaCodigo,
       empresaNome: base.empresaNome,
       codigoProduto: base.codigoProduto,
@@ -842,6 +853,7 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
   const itens = await prisma.contagemItem.findMany({
     where: {
       ...(filtro?.status ? { status: filtro.status } : {}),
+      ...(filtro?.cicloId ? { cicloId: filtro.cicloId } : {}),
       ...(ehFilial(filtro?.filial)
         ? { localCodigo: { startsWith: prefixoDaFilial(filtro.filial) } }
         : {}),
@@ -1296,6 +1308,8 @@ export async function atribuirContagemItens(
     paisPorLocal.set(localCodigo, await getPaiDoLocal(localCodigo));
   }
 
+  const ciclo = await garantirCicloAberto(input.atribuidoPorId);
+
   await prisma.contagemItem.createMany({
     data: novos.map((i) => {
       const { rua, predio, nivel } = resolverLocalizacao(
@@ -1304,6 +1318,7 @@ export async function atribuirContagemItens(
         ehLocalPaiAgrupador
       );
       return {
+        cicloId: ciclo.id,
         empresaCodigo: i.empresaCodigo,
         empresaNome: i.empresaNome,
         codigoProduto: i.codigoProduto,

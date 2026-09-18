@@ -11,6 +11,7 @@ const filtroSchema = z.object({
   dataInicio: z.coerce.date().optional(),
   dataFim: z.coerce.date().optional(),
   empresaCodigo: z.string().min(1).optional(),
+  cicloId: z.string().min(1).optional(),
 });
 
 dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {

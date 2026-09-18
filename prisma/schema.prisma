@@ -42,6 +42,9 @@ model Usuario {
   contagemItensAtribuidos     ContagemItem[] @relation("ContagemAtribuidaPara")
   contagemItensQueAtribuiu    ContagemItem[] @relation("ContagemAtribuidaPor")
 
+  ciclosAbertos  CicloContagem[] @relation("CicloAbertoPor")
+  ciclosFechados CicloContagem[] @relation("CicloFechadoPor")
+
   notificacaoPreferencias NotificacaoPreferencia[]
   notificacoes            Notificacao[]
 
@@ -248,8 +251,42 @@ model AppVersao {
 //   | AGUARDANDO_SEGUNDA_CONTAGEM (divergiu, gestor pediu recontagem, ninguém
 //   bipou ainda pra ela) | SEGUNDA_EM_ANDAMENTO (recontagem bipada, ainda não
 //   enviada).
+// Um inventário: o recorte que delimita "uma contagem".
+//
+// Antes disso a contagem era uma tabela solta filtrada por data, e comparar
+// dois inventários dependia de alguém lembrar as datas exatas de cada um.
+// Com o ciclo, "a contagem de setembro" é uma coisa que existe, tem começo,
+// fim e dono, e pode ser comparada com a anterior sem ambiguidade.
+//
+// Só um ciclo fica ABERTO por vez: toda atribuição nova cai nele. Fechar um
+// ciclo congela o recorte — os itens continuam lá, mas nada novo entra.
+model CicloContagem {
+  id     String @id @default(uuid())
+  nome   String
+  // ABERTO | FECHADO
+  status String @default("ABERTO")
+
+  abertoEm    DateTime  @default(now())
+  abertoPor   Usuario?  @relation("CicloAbertoPor", fields: [abertoPorId], references: [id])
+  abertoPorId String?
+  fechadoEm   DateTime?
+  fechadoPor  Usuario?  @relation("CicloFechadoPor", fields: [fechadoPorId], references: [id])
+  fechadoPorId String?
+
+  observacao String?
+
+  itens ContagemItem[]
+
+  @@map("ciclos_contagem")
+}
+
 model ContagemItem {
   id String @id @default(uuid())
+
+  // Inventário a que este item pertence. Nulo só nas linhas criadas antes do
+  // ciclo existir (ver a migração 20260918000000_ciclo_contagem).
+  ciclo   CicloContagem? @relation(fields: [cicloId], references: [id])
+  cicloId String?
 
   empresaCodigo      String
   empresaNome        String

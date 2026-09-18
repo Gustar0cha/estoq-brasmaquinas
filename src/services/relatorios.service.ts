@@ -150,6 +150,8 @@ export interface FiltroRelatorioContagem {
   dataInicio?: Date;
   dataFim?: Date;
   somenteDivergencias?: boolean;
+  // Inventário. Ausente = todos, que é o acumulado.
+  cicloId?: string;
   // Ver FiltroRelatorio.incluirFotos.
   incluirFotos?: boolean;
 }
@@ -161,7 +163,7 @@ export interface FiltroRelatorioContagem {
 export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContagem): Promise<ExcelJS.Buffer> {
   const somenteDivergencias = Boolean(filtro.somenteDivergencias);
   const comFotos = Boolean(filtro.incluirFotos);
-  const base = { dataInicio: filtro.dataInicio, dataFim: filtro.dataFim };
+  const base = { dataInicio: filtro.dataInicio, dataFim: filtro.dataFim, cicloId: filtro.cicloId };
 
   const itens = somenteDivergencias
     ? [
@@ -340,6 +342,123 @@ export async function gerarRelatorioSistemaVsContadoExcel(
       resultadoRecontagem: resultadoDaRecontagem(item),
       diferencaAtual: saldoAtual !== undefined ? saldoAtual - ultimaContagem : '',
       dataContagem: item.dataConferencia2 ?? item.dataConferencia ?? '',
+    });
+  }
+
+  return workbook.xlsx.writeBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// Uma contagem contra a anterior
+// ---------------------------------------------------------------------------
+
+export interface FiltroComparativoCiclos {
+  cicloAtualId: string;
+  cicloAnteriorId: string;
+  // Só as linhas em que as duas contagens não deram o mesmo número.
+  somenteMudancas?: boolean;
+}
+
+// Compara dois inventários item a item (produto + local).
+//
+// A pergunta que isso responde é "o que mudou de uma contagem pra outra" —
+// item que passou a divergir, item que parou de divergir, e item que só
+// existe em uma das duas. Esse último caso importa tanto quanto os outros:
+// produto que sumiu da prateleira entre um inventário e o seguinte não
+// aparece em nenhuma comparação que só olhe os itens em comum.
+export async function gerarRelatorioComparativoCiclosExcel(
+  filtro: FiltroComparativoCiclos
+): Promise<ExcelJS.Buffer> {
+  const [cicloAtual, cicloAnterior] = await Promise.all([
+    prisma.cicloContagem.findUnique({ where: { id: filtro.cicloAtualId } }),
+    prisma.cicloContagem.findUnique({ where: { id: filtro.cicloAnteriorId } }),
+  ]);
+  if (!cicloAtual || !cicloAnterior) throw new Error('Contagem não encontrada.');
+
+  const [itensAtual, itensAnterior] = await Promise.all([
+    getContagemItens({ cicloId: filtro.cicloAtualId }),
+    getContagemItens({ cicloId: filtro.cicloAnteriorId }),
+  ]);
+
+  const chaveDe = (item: ContagemItemDTO) => `${item.codigoProduto}|${item.localCodigo}`;
+  const porChaveAnterior = new Map(itensAnterior.map((i) => [chaveDe(i), i]));
+  const porChaveAtual = new Map(itensAtual.map((i) => [chaveDe(i), i]));
+
+  // A quantidade que vale é a da última contagem daquele item: se houve
+  // recontagem, é ela que corrige a primeira.
+  const contadoDe = (item?: ContagemItemDTO): number | null =>
+    item ? (item.quantidadeConferida2 ?? item.quantidadeConferida) : null;
+
+  const usuarios = await prisma.usuario.findMany({ select: { id: true, nome: true } });
+  const nomePorId = new Map(usuarios.map((u) => [u.id, u.nome]));
+  const quemContou = (item?: ContagemItemDTO) => {
+    if (!item) return '';
+    const id = item.conferidoPor2Id ?? item.conferidoPorId ?? item.atribuidoPara;
+    return id ? (nomePorId.get(id) ?? '') : '';
+  };
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Comparativo');
+
+  sheet.columns = [
+    { header: 'SKU', key: 'sku', width: 14 },
+    { header: 'Descrição', key: 'descricao', width: 40 },
+    { header: 'Local', key: 'local', width: 28 },
+    { header: `Esperado (${cicloAnterior.nome})`, key: 'esperadoAnterior', width: 20 },
+    { header: `Contado (${cicloAnterior.nome})`, key: 'contadoAnterior', width: 20 },
+    { header: `Diferença (${cicloAnterior.nome})`, key: 'difAnterior', width: 20 },
+    { header: `Esperado (${cicloAtual.nome})`, key: 'esperadoAtual', width: 20 },
+    { header: `Contado (${cicloAtual.nome})`, key: 'contadoAtual', width: 20 },
+    { header: `Diferença (${cicloAtual.nome})`, key: 'difAtual', width: 20 },
+    { header: 'Variação entre as contagens', key: 'variacao', width: 26 },
+    { header: 'O que mudou', key: 'situacao', width: 34 },
+    { header: 'Quem contou (anterior)', key: 'quemAnterior', width: 22 },
+    { header: 'Quem contou (atual)', key: 'quemAtual', width: 22 },
+  ];
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };
+  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+  const todasAsChaves = new Set([...porChaveAtual.keys(), ...porChaveAnterior.keys()]);
+
+  for (const chave of [...todasAsChaves].sort()) {
+    const atual = porChaveAtual.get(chave);
+    const anterior = porChaveAnterior.get(chave);
+    const referencia = atual ?? anterior!;
+
+    const contadoAtual = contadoDe(atual);
+    const contadoAnterior = contadoDe(anterior);
+    const difAtual = atual && contadoAtual !== null ? contadoAtual - atual.quantidadeEsperada : null;
+    const difAnterior =
+      anterior && contadoAnterior !== null ? contadoAnterior - anterior.quantidadeEsperada : null;
+
+    let situacao: string;
+    if (!anterior) situacao = 'Só na contagem atual';
+    else if (!atual) situacao = 'Só na contagem anterior';
+    else if (contadoAtual === null || contadoAnterior === null) situacao = 'Sem contagem nos dois lados';
+    else if (difAtual === 0 && difAnterior === 0) situacao = 'Bateu nas duas';
+    else if (difAtual === 0 && difAnterior !== 0) situacao = 'Corrigiu: divergia e agora bate';
+    else if (difAtual !== 0 && difAnterior === 0) situacao = 'Piorou: batia e agora diverge';
+    else situacao = 'Diverge nas duas';
+
+    const variacao =
+      contadoAtual !== null && contadoAnterior !== null ? contadoAtual - contadoAnterior : null;
+
+    if (filtro.somenteMudancas && situacao === 'Bateu nas duas') continue;
+
+    sheet.addRow({
+      sku: referencia.codigoProduto,
+      descricao: referencia.descricao,
+      local: referencia.local,
+      esperadoAnterior: anterior ? anterior.quantidadeEsperada : '',
+      contadoAnterior: contadoAnterior ?? '',
+      difAnterior: difAnterior ?? '',
+      esperadoAtual: atual ? atual.quantidadeEsperada : '',
+      contadoAtual: contadoAtual ?? '',
+      difAtual: difAtual ?? '',
+      variacao: variacao ?? '',
+      situacao,
+      quemAnterior: quemContou(anterior),
+      quemAtual: quemContou(atual),
     });
   }
 

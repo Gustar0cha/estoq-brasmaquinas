@@ -20,6 +20,10 @@ export interface FiltroDashboard {
   dataFim?: Date;
   // Empresa do Sankhya (CODEMP). Ausente = todas.
   empresaCodigo?: string;
+  // Inventário. Ausente = todos — é o que mostra o acumulado; escolhido,
+  // recorta num inventário específico, que é como se olha uma contagem
+  // passada sem depender de lembrar as datas dela.
+  cicloId?: string;
 }
 
 export interface EmpresaDashboard {
@@ -131,6 +135,7 @@ export interface DashboardContagem {
   // outras e não haveria como voltar.
   empresas: EmpresaDashboard[];
   empresaSelecionada: string | null;
+  cicloSelecionado: string | null;
 
   ranking: RankingUsuarioDashboard[];
   porDia: DiaDashboard[];
@@ -184,11 +189,13 @@ function diaDe(data: Date): string {
 
 export async function getDashboardContagem(filtro: FiltroDashboard): Promise<DashboardContagem> {
   const daEmpresa = filtro.empresaCodigo ? { empresaCodigo: filtro.empresaCodigo } : {};
+  const doCiclo = filtro.cicloId ? { cicloId: filtro.cicloId } : {};
 
   const where =
     filtro.modo === 'HISTORICO'
       ? {
           ...daEmpresa,
+          ...doCiclo,
           status: { in: STATUS_CONTADO },
           // No histórico a data que importa é a da contagem, não a da
           // atribuição: o recorte é "o que foi contado nesse período".
@@ -197,7 +204,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
             { dataConferencia2: { gte: filtro.dataInicio, lte: filtro.dataFim } },
           ],
         }
-      : daEmpresa;
+      : { ...daEmpresa, ...doCiclo };
 
   const itens = (await prisma.contagemItem.findMany({
     where,
@@ -505,6 +512,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
     atualizadoEm: new Date().toISOString(),
     empresas,
     empresaSelecionada: filtro.empresaCodigo ?? null,
+    cicloSelecionado: filtro.cicloId ?? null,
     totais,
     valores,
     ranking,
