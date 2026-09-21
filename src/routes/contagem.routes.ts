@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as contagemService from '../services/contagem.service';
+import { getPanoramaEstoque } from '../services/panorama.service';
 import { StatusContagemItem } from '../services/contagem.service';
 
 
@@ -69,6 +70,8 @@ const atribuirContagemSchema = z.object({
   // Recorte por marca/grupo do Sankhya; ausente ou vazio = sem recorte.
   marcas: z.array(z.string()).optional(),
   grupos: z.array(z.string()).optional(),
+  custoMinimo: z.coerce.number().optional(),
+  custoMaximo: z.coerce.number().optional(),
 });
 
 contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
@@ -446,5 +449,22 @@ contagemRouter.post('/atribuir-itens', autenticar, exigirAdmin, async (req, res)
     res
       .status(400)
       .json({ erro: error instanceof Error ? error.message : 'Não foi possível atribuir os itens.' });
+  }
+});
+
+// Panorama do estoque inteiro: quanto já está em contagem e quanto ainda nem
+// foi distribuído. Consulta pesada (varre o saldo todo), por isso o resultado
+// fica no cache de 5 minutos do módulo de saldo.
+contagemRouter.get('/panorama', autenticar, exigirAdmin, async (req, res) => {
+  const { cicloId } = req.query;
+
+  try {
+    res.json(
+      await getPanoramaEstoque(typeof cicloId === 'string' && cicloId ? cicloId : undefined)
+    );
+  } catch (error) {
+    res.status(502).json({
+      erro: error instanceof Error ? error.message : 'Não foi possível montar o panorama.',
+    });
   }
 });

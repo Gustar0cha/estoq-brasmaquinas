@@ -6,6 +6,7 @@ import {
   gerarRelatorioExcel,
   gerarRelatorioSistemaVsContadoExcel,
   gerarRelatorioComparativoCiclosExcel,
+  gerarRelatorioEspalhadosExcel,
 } from '../services/relatorios.service';
 import { StatusConferencia } from '../services/movimentacoes.service';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
@@ -104,6 +105,24 @@ relatoriosRouter.get('/comparativo-ciclos/xlsx', autenticar, exigirAdmin, async 
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="comparativo-contagens.xlsx"');
+    res.send(buffer);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível gerar o relatório.' });
+  }
+});
+
+// Produto espalhado na mesma rua: uma linha por endereço, pra filtrar no Excel.
+relatoriosRouter.get('/espalhados/xlsx', autenticar, exigirAdmin, async (req, res) => {
+  const { cicloId } = req.query;
+
+  try {
+    const buffer = await gerarRelatorioEspalhadosExcel(
+      typeof cicloId === 'string' && cicloId ? cicloId : undefined
+    );
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="produto-espalhado.xlsx"');
     res.send(buffer);
   } catch (error) {
     res

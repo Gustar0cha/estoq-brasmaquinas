@@ -7,6 +7,8 @@ import {
   getLocaisEsperadosDoProduto,
   getPaiDoLocal,
   ProdutoBuscaSankhya,
+  chaveCusto,
+  getCustosSemIcms,
 } from '../sankhya/client';
 import {
   getItensComSaldoPorLocais,
@@ -63,9 +65,10 @@ export interface ContagemItemDTO {
   unidade: string;
   local: string;
   localCodigo: string;
+  // Inventário a que o item pertence.
+  cicloId: string | null;
   // Conferida contra o DISPONÍVEL (total - reservado): o item reservado já
   // foi separado pra um pedido e não deveria mais estar na prateleira.
-  cicloId: string | null;
   quantidadeEsperada: number;
   quantidadeTotal: number | null;
   quantidadeReservada: number;
@@ -311,6 +314,10 @@ export interface AtribuirContagemPredioInput {
   // que casam com o filtro que o admin está vendo na tela. Vazio = tudo.
   marcas?: string[];
   grupos?: string[];
+  // Recorte por valor: atribui só o que custa a partir de / até tanto, pelo
+  // custo total daquele endereço (custo unitário x disponível).
+  custoMinimo?: number;
+  custoMaximo?: number;
   // Opcional: atribui só um nível do prédio. undefined = prédio inteiro;
   // null = só os locais do prédio que não trazem nível no nome.
   nivel?: string | null;
@@ -364,9 +371,27 @@ export async function atribuirContagemPredio(
     input.empresaCodigo
   );
 
-  const filtrados = filtrarPorMarcaEGrupo(itensComSaldo, input.marcas, input.grupos);
+  let filtrados = filtrarPorMarcaEGrupo(itensComSaldo, input.marcas, input.grupos);
+
+  if (input.custoMinimo !== undefined || input.custoMaximo !== undefined) {
+    const custos = await getCustosSemIcms(
+      filtrados.map((i) => ({ codigoProduto: i.codigoProduto, empresaCodigo: i.empresaCodigo }))
+    );
+    filtrados = filtrados.filter((i) => {
+      const unitario = custos.get(chaveCusto(i.codigoProduto, i.empresaCodigo)) ?? 0;
+      // Sem custo cadastrado o item fica de fora do recorte por valor: custo
+      // zero não é o mesmo que "barato", e incluí-lo encheria a atribuição de
+      // item que ninguém pediu.
+      if (unitario === 0) return false;
+      const total = unitario * i.quantidadeDisponivel;
+      if (input.custoMinimo !== undefined && total < input.custoMinimo) return false;
+      if (input.custoMaximo !== undefined && total > input.custoMaximo) return false;
+      return true;
+    });
+  }
+
   if (filtrados.length === 0) {
-    throw new Error('Nenhum item com saldo bate com esse filtro de marca/grupo.');
+    throw new Error('Nenhum item com saldo bate com esse filtro.');
   }
 
   const novos = await somenteForaDeContagemAberta(filtrados, input.empresaCodigo);
@@ -382,19 +407,19 @@ export async function atribuirContagemPredio(
       cicloId: ciclo.id,
       empresaCodigo: i.empresaCodigo,
       empresaNome: i.empresaNome,
-      codigoProduto: i.codigoProduto,
-      descricao: i.descricao,
-      unidade: i.unidade,
-      local: i.local,
-      localCodigo: i.localCodigo,
+        codigoProduto: i.codigoProduto,
+        descricao: i.descricao,
+        unidade: i.unidade,
+        local: i.local,
+        localCodigo: i.localCodigo,
       quantidadeEsperada: i.quantidadeDisponivel,
-      quantidadeTotal: i.quantidadeTotal,
-      quantidadeReservada: i.quantidadeReservada,
+        quantidadeTotal: i.quantidadeTotal,
+        quantidadeReservada: i.quantidadeReservada,
       dataSaldo: new Date(),
       status: 'PENDENTE',
       rua: input.rua,
       predio: input.predio,
-      nivel: nivelPorLocal.get(i.localCodigo) ?? null,
+        nivel: nivelPorLocal.get(i.localCodigo) ?? null,
       atribuidoParaId: input.atribuidoParaId,
       atribuidoPorId: input.atribuidoPorId,
     })),
@@ -1201,6 +1226,13 @@ export interface ItemDisponivelDTO {
   quantidadeTotal: number;
   quantidadeReservada: number;
   quantidadeDisponivel: number;
+  // Custo sem ICMS do Sankhya, por unidade. Zero quando o produto não tem
+  // custo cadastrado — o que é diferente de custar zero, e por isso o filtro
+  // por valor ignora esses itens em vez de tratá-los como baratos.
+  custoUnitario: number;
+  // custoUnitario x disponível: é por este número que o admin prioriza,
+  // porque é o dinheiro parado naquele endereço.
+  custoTotal: number;
   // Já está numa contagem aberta — atribuir de novo não faria nada.
   emContagem: boolean;
 }
@@ -1234,27 +1266,37 @@ export async function getItensDisponiveis(filtro: {
     filtro.empresaCodigo
   );
 
-  const abertos = await prisma.contagemItem.findMany({
-    where: { empresaCodigo: filtro.empresaCodigo, status: { in: STATUS_ABERTOS } },
-    select: { codigoProduto: true, localCodigo: true },
-  });
+  const [abertos, custos] = await Promise.all([
+    prisma.contagemItem.findMany({
+      where: { empresaCodigo: filtro.empresaCodigo, status: { in: STATUS_ABERTOS } },
+      select: { codigoProduto: true, localCodigo: true },
+    }),
+    getCustosSemIcms(
+      comSaldo.map((i) => ({ codigoProduto: i.codigoProduto, empresaCodigo: i.empresaCodigo }))
+    ),
+  ]);
   const chavesAbertas = new Set(abertos.map((a) => `${a.codigoProduto}|${a.localCodigo}`));
 
-  const itens: ItemDisponivelDTO[] = comSaldo.map((i) => ({
-    codigoProduto: i.codigoProduto,
-    descricao: i.descricao,
-    unidade: i.unidade,
-    localCodigo: i.localCodigo,
-    local: i.local,
-    nivel: nivelPorLocal.get(i.localCodigo) ?? null,
-    marca: i.marca,
-    grupoCodigo: i.grupoCodigo,
-    grupo: i.grupo,
-    quantidadeTotal: i.quantidadeTotal,
-    quantidadeReservada: i.quantidadeReservada,
-    quantidadeDisponivel: i.quantidadeDisponivel,
-    emContagem: chavesAbertas.has(`${i.codigoProduto}|${i.localCodigo}`),
-  }));
+  const itens: ItemDisponivelDTO[] = comSaldo.map((i) => {
+    const custoUnitario = custos.get(chaveCusto(i.codigoProduto, i.empresaCodigo)) ?? 0;
+    return {
+      codigoProduto: i.codigoProduto,
+      descricao: i.descricao,
+      unidade: i.unidade,
+      localCodigo: i.localCodigo,
+      local: i.local,
+      nivel: nivelPorLocal.get(i.localCodigo) ?? null,
+      marca: i.marca,
+      grupoCodigo: i.grupoCodigo,
+      grupo: i.grupo,
+      quantidadeTotal: i.quantidadeTotal,
+      quantidadeReservada: i.quantidadeReservada,
+      quantidadeDisponivel: i.quantidadeDisponivel,
+      custoUnitario,
+      custoTotal: Math.round(custoUnitario * i.quantidadeDisponivel * 100) / 100,
+      emContagem: chavesAbertas.has(`${i.codigoProduto}|${i.localCodigo}`),
+    };
+  });
 
   const marcas = [...new Set(itens.map((i) => i.marca).filter((m): m is string => !!m))].sort(
     (a, b) => a.localeCompare(b, 'pt-BR')
@@ -1321,14 +1363,14 @@ export async function atribuirContagemItens(
         cicloId: ciclo.id,
         empresaCodigo: i.empresaCodigo,
         empresaNome: i.empresaNome,
-        codigoProduto: i.codigoProduto,
-        descricao: i.descricao,
-        unidade: i.unidade,
-        local: i.local,
-        localCodigo: i.localCodigo,
+          codigoProduto: i.codigoProduto,
+          descricao: i.descricao,
+          unidade: i.unidade,
+          local: i.local,
+          localCodigo: i.localCodigo,
         quantidadeEsperada: i.quantidadeDisponivel,
-        quantidadeTotal: i.quantidadeTotal,
-        quantidadeReservada: i.quantidadeReservada,
+          quantidadeTotal: i.quantidadeTotal,
+          quantidadeReservada: i.quantidadeReservada,
         dataSaldo: new Date(),
         status: 'PENDENTE',
         rua,

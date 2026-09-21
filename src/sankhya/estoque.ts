@@ -365,3 +365,82 @@ export async function getPedidosQueReservam(
     }));
   });
 }
+
+// ---------------------------------------------------------------------------
+// Panorama: TODO o estoque com saldo, não só o que está em contagem
+// ---------------------------------------------------------------------------
+
+export interface LinhaSaldoCompleto {
+  codigoProduto: string;
+  descricao: string;
+  localCodigo: string;
+  local: string;
+  localPaiCodigo: string | null;
+  localPai: string | null;
+  empresaCodigo: string;
+  quantidade: number;
+}
+
+interface LinhaBrutaCompleta {
+  p: number;
+  d: string;
+  l: number;
+  nl: string | null;
+  pai: number | null;
+  npai: string | null;
+  e: number;
+  q: number;
+}
+
+// Varre o estoque inteiro (hoje ~19.500 combinações produto+local em 4
+// páginas, ~3s). É caro, então entra no mesmo cache de 5 minutos: serve pra
+// responder "o que ainda nem foi distribuído pra contar", pergunta que não
+// tem como ser respondida olhando só o que já está na contagem.
+export async function getSaldoCompleto(): Promise<LinhaSaldoCompleto[]> {
+  return comCache('saldo-completo', VALIDADE_SALDO_MS, async () => {
+    const linhas: LinhaBrutaCompleta[] = [];
+    let offset = 0;
+
+    while (true) {
+      const pagina = await executarQuery<LinhaBrutaCompleta>(`
+        SELECT
+          S.CODPROD AS "p",
+          MAX(PRO.DESCRPROD) AS "d",
+          S.CODLOCAL AS "l",
+          MAX(LOC.DESCRLOCAL) AS "nl",
+          MAX(LOC.CODLOCALPAI) AS "pai",
+          MAX(PAI.DESCRLOCAL) AS "npai",
+          S.CODEMP AS "e",
+          MAX(S.Q) AS "q"
+        FROM (
+          SELECT EST.CODPROD, EST.CODLOCAL, EST.CODEMP, SUM(EST.ESTOQUE) AS Q
+          FROM TGFEST EST
+          GROUP BY EST.CODPROD, EST.CODLOCAL, EST.CODEMP
+          HAVING NVL(SUM(EST.ESTOQUE), 0) > 0
+        ) S
+        INNER JOIN TGFPRO PRO ON PRO.CODPROD = S.CODPROD
+        LEFT JOIN TGFLOC LOC ON LOC.CODLOCAL = S.CODLOCAL
+        LEFT JOIN TGFLOC PAI ON PAI.CODLOCAL = LOC.CODLOCALPAI
+        WHERE ${FILTRO_SQL_SEM_QUARENTENA}
+        GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
+        ORDER BY S.CODLOCAL, S.CODPROD
+        OFFSET ${offset} ROWS FETCH NEXT ${PAGINA} ROWS ONLY
+      `);
+
+      linhas.push(...pagina);
+      if (pagina.length < PAGINA) break;
+      offset += PAGINA;
+    }
+
+    return linhas.map((l) => ({
+      codigoProduto: String(l.p),
+      descricao: l.d,
+      localCodigo: String(l.l),
+      local: l.nl ?? String(l.l),
+      localPaiCodigo: l.pai === null || l.pai === undefined ? null : String(l.pai),
+      localPai: l.npai ?? null,
+      empresaCodigo: String(l.e),
+      quantidade: Number(l.q) || 0,
+    }));
+  });
+}

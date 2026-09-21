@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 
 import { prisma } from '../lib/prisma';
+import { getPanoramaEstoque } from './panorama.service';
 import { ContagemItemDTO, getContagemItens, getFotoContagemItem } from './contagem.service';
 import { getFotoContagem, getItensAgrupados, ItemAgrupadoDTO } from './itemConferencia.service';
 import {
@@ -460,6 +461,49 @@ export async function gerarRelatorioComparativoCiclosExcel(
       quemAnterior: quemContou(anterior),
       quemAtual: quemContou(atual),
     });
+  }
+
+  return workbook.xlsx.writeBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// Produto espalhado na mesma rua
+// ---------------------------------------------------------------------------
+
+// Uma linha por endereço, não por produto: é assim que dá pra filtrar no Excel
+// pela rua e sair com a lista do que precisa ser juntado num endereço só.
+export async function gerarRelatorioEspalhadosExcel(cicloId?: string): Promise<ExcelJS.Buffer> {
+  const panorama = await getPanoramaEstoque(cicloId);
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Produto espalhado');
+
+  sheet.columns = [
+    { header: 'Rua', key: 'rua', width: 10 },
+    { header: 'SKU', key: 'sku', width: 14 },
+    { header: 'Descrição', key: 'descricao', width: 44 },
+    { header: 'Em quantos endereços', key: 'quantos', width: 20 },
+    { header: 'Endereço', key: 'local', width: 34 },
+    { header: 'Código do local', key: 'localCodigo', width: 16 },
+    { header: 'Quantidade nesse endereço', key: 'quantidade', width: 24 },
+    { header: 'Quantidade total na rua', key: 'total', width: 22 },
+  ];
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF024742' } };
+  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+  for (const produto of panorama.espalhados) {
+    for (const local of produto.locais) {
+      sheet.addRow({
+        rua: produto.rua === null ? '' : `Rua ${produto.rua}`,
+        sku: produto.codigoProduto,
+        descricao: produto.descricao,
+        quantos: produto.locais.length,
+        local: local.local,
+        localCodigo: local.localCodigo,
+        quantidade: local.quantidade,
+        total: produto.quantidadeTotal,
+      });
+    }
   }
 
   return workbook.xlsx.writeBuffer();
