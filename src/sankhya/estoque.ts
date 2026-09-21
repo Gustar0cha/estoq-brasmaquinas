@@ -444,3 +444,29 @@ export async function getSaldoCompleto(): Promise<LinhaSaldoCompleto[]> {
     }));
   });
 }
+
+// Todos os itens com saldo num único local, sem precisar saber a empresa.
+//
+// Existe pra contagem avulsa: o operador bipa a etiqueta da prateleira e o
+// app precisa saber o que deveria estar ali. Diferente de
+// getItensComSaldoPorLocais, que parte de um prédio já escolhido pelo admin
+// e por isso já conhece a empresa.
+export async function getItensComSaldoDoLocal(
+  localCodigo: string
+): Promise<ItemComSaldoSankhya[]> {
+  const local = Number(localCodigo);
+  if (!Number.isFinite(local)) return [];
+
+  return comCache(`itens-local|${local}`, VALIDADE_SALDO_MS, async () => {
+    const linhas = await executarQuery<LinhaItemComSaldo>(`
+      SELECT ${CAMPOS_ITEM}
+      FROM (${SUBCONSULTA_SALDO}) S
+      ${JUNCOES_ITEM}
+      WHERE S.CODLOCAL = ${local}
+        AND ${FILTRO_SQL_SEM_QUARENTENA}
+      GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
+      ORDER BY MAX(PRO.DESCRPROD)
+    `);
+    return linhas.map(montarItem);
+  });
+}

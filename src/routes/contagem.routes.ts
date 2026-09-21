@@ -67,6 +67,8 @@ const atribuirContagemSchema = z.object({
   filial: z.string().nullable().optional(),
   empresaCodigo: z.string().min(1),
   atribuidoParaId: z.string().min(1),
+  // Mais de uma pessoa no mesmo prédio: os itens são repartidos entre elas.
+  atribuidoParaIds: z.array(z.string().min(1)).optional(),
   // Recorte por marca/grupo do Sankhya; ausente ou vazio = sem recorte.
   marcas: z.array(z.string()).optional(),
   grupos: z.array(z.string()).optional(),
@@ -466,5 +468,43 @@ contagemRouter.get('/panorama', autenticar, exigirAdmin, async (req, res) => {
     res.status(502).json({
       erro: error instanceof Error ? error.message : 'Não foi possível montar o panorama.',
     });
+  }
+});
+
+// Zero sem bipar: o operador abre o item, não acha o produto e registra.
+// Não é exigirAdmin — é ação de quem está contando.
+contagemItensRouter.post('/:id/nao-encontrado', autenticar, async (req, res) => {
+  const { id } = req.params as { id: string };
+
+  try {
+    res.json(await contagemService.registrarNaoEncontrado(id, req.usuario!.sub));
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível registrar.' });
+  }
+});
+
+const avulsaSchema = z.object({ localCodigo: z.string().min(1) });
+
+// Contagem avulsa: o operador bipa a prateleira e conta o que está nela, sem
+// esperar o admin distribuir.
+contagemRouter.post('/avulsa', autenticar, async (req, res) => {
+  const parse = avulsaSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Informe o código do local.' });
+    return;
+  }
+
+  try {
+    const resultado = await contagemService.iniciarContagemAvulsa({
+      localCodigo: parse.data.localCodigo,
+      usuarioId: req.usuario!.sub,
+    });
+    res.status(201).json(resultado);
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a contagem.' });
   }
 });

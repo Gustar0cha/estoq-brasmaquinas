@@ -11,6 +11,7 @@ import {
   getCustosSemIcms,
 } from '../sankhya/client';
 import {
+  getItensComSaldoDoLocal,
   getItensComSaldoPorLocais,
   getLocaisComSaldo,
   getPedidosQueReservam,
@@ -324,6 +325,10 @@ export interface AtribuirContagemPredioInput {
   filial?: string | null;
   empresaCodigo: string;
   atribuidoParaId: string;
+  // Mais gente no mesmo prédio: os itens são REPARTIDOS entre eles, um dono
+  // por item. Ninguém conta o mesmo item duas vezes e o ranking continua
+  // medindo o trabalho de cada um.
+  atribuidoParaIds?: string[];
   atribuidoPorId: string;
 }
 
@@ -354,7 +359,15 @@ export async function atribuirContagemPredio(
     throw new Error('Esse prédio não tem saldo em estoque pra contar.');
   }
 
-  await exigirFilialCompativel(input.atribuidoParaId, grupo.filial);
+  // A lista manda quando vem; senão, uma pessoa só (o formato antigo).
+  const responsaveis =
+    input.atribuidoParaIds && input.atribuidoParaIds.length > 0
+      ? [...new Set(input.atribuidoParaIds)]
+      : [input.atribuidoParaId];
+
+  for (const responsavel of responsaveis) {
+    await exigirFilialCompativel(responsavel, grupo.filial);
+  }
 
   const locaisAlvo =
     input.nivel === undefined ? grupo.locais : grupo.locais.filter((l) => l.nivel === input.nivel);
@@ -403,7 +416,7 @@ export async function atribuirContagemPredio(
   const ciclo = await garantirCicloAberto(input.atribuidoPorId);
 
   await prisma.contagemItem.createMany({
-    data: novos.map((i) => ({
+    data: novos.map((i, indice) => ({
       cicloId: ciclo.id,
       empresaCodigo: i.empresaCodigo,
       empresaNome: i.empresaNome,
@@ -420,7 +433,11 @@ export async function atribuirContagemPredio(
       rua: input.rua,
       predio: input.predio,
         nivel: nivelPorLocal.get(i.localCodigo) ?? null,
-      atribuidoParaId: input.atribuidoParaId,
+      // Reparte em rodízio: com 3 pessoas, o item 1 vai pra primeira, o 2 pra
+      // segunda, o 3 pra terceira, o 4 volta pra primeira. Como a lista vem
+      // ordenada por local, cada um fica com endereços intercalados em vez de
+      // uma pessoa herdar só o fundo do prédio.
+      atribuidoParaId: responsaveis[indice % responsaveis.length],
       atribuidoPorId: input.atribuidoPorId,
     })),
   });
@@ -429,13 +446,21 @@ export async function atribuirContagemPredio(
   const rotulo =
     rotuloDoGrupo(input.rua, input.predio) +
     (input.nivel !== undefined ? ` · ${rotuloDaSubdivisao(input.nivel)}` : '');
-  await notificarUsuario(
-    'ATRIBUICAO_CONTAGEM',
-    `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`,
-    'Nova contagem atribuída',
-    `${nomeAdmin} atribuiu ${rotulo} pra você contar (${novos.length} ite${novos.length === 1 ? 'm' : 'ns'}).`,
-    input.atribuidoParaId
-  );
+
+  for (const [posicao, responsavel] of responsaveis.entries()) {
+    // Quantos couberam a esta pessoa, não o total: dizer "40 itens" pra quem
+    // recebeu 14 faz a pessoa procurar trabalho que é de outro.
+    const meus = novos.filter((_, indice) => indice % responsaveis.length === posicao).length;
+    if (meus === 0) continue;
+    await notificarUsuario(
+      'ATRIBUICAO_CONTAGEM',
+      `${input.empresaCodigo}|${chavePredio(input.rua, input.predio)}`,
+      'Nova contagem atribuída',
+      `${nomeAdmin} atribuiu ${rotulo} pra você contar (${meus} ite${meus === 1 ? 'm' : 'ns'}` +
+        (responsaveis.length > 1 ? `, dividido com mais ${responsaveis.length - 1}).` : ').'),
+      responsavel
+    );
+  }
 
   return { criados: novos.length };
 }
@@ -1392,4 +1417,133 @@ export async function atribuirContagemItens(
   );
 
   return { criados: novos.length };
+}
+
+// ---------------------------------------------------------------------------
+// Não encontrado: registrar zero sem bipar
+// ---------------------------------------------------------------------------
+
+// Exigir o bipe do local pra registrar zero é pedir que a pessoa prove que
+// esteve num lugar onde o produto não está. O bipe existe pra garantir que a
+// contagem de uma QUANTIDADE veio do endereço certo; quando a quantidade é
+// zero não há o que validar, e a exigência só trava a fila.
+//
+// Fica registrado como zero contado, com motivo automático, e o item segue o
+// mesmo caminho de qualquer outra divergência.
+export async function registrarNaoEncontrado(
+  itemId: string,
+  usuarioId: string
+): Promise<ContagemItemDTO> {
+  const item = await prisma.contagemItem.findUnique({ where: { id: itemId } });
+  if (!item) throw new Error('Item não encontrado.');
+
+  const segunda = item.segundaContagemSolicitada && item.quantidadeConferida2 === null;
+  const dono = segunda ? item.segundaContagemUsuarioId : item.atribuidoParaId;
+  if (dono !== usuarioId) {
+    throw new Error('Esse item não está na sua lista de contagem.');
+  }
+  if (!segunda && item.quantidadeConferida !== null) {
+    throw new Error('Esse item já foi contado.');
+  }
+
+  // Passa pelo mesmo estado "em andamento" de qualquer contagem, pra a
+  // trilha registrar quem e quando. Os campos de bipe ficam vazios de
+  // propósito: é a marca de que ninguém escaneou nada aqui.
+  await prisma.contagemItem.update({
+    where: { id: itemId },
+    data: segunda
+      ? { status: 'SEGUNDA_EM_ANDAMENTO', segundaContagemIniciadaEm: new Date() }
+      : { status: 'EM_ANDAMENTO', iniciadoPorId: usuarioId, iniciadoEm: new Date() },
+  });
+
+  return enviarContagemItem({
+    itemId,
+    conferidoPorId: usuarioId,
+    quantidadeConferida: 0,
+    motivo: 'Não encontrado no local',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Contagem avulsa: o operador escolhe o endereço, sem esperar atribuição
+// ---------------------------------------------------------------------------
+
+export interface ContagemAvulsaInput {
+  localCodigo: string;
+  usuarioId: string;
+}
+
+// Bipou a prateleira, conta o que está nela. Serve pra quem terminou a lista
+// e quer seguir, e pra endereço que o admin ainda não distribuiu — que hoje
+// são a maioria.
+//
+// Os itens nascem exatamente como os de uma atribuição normal (mesmo ciclo,
+// mesma regra de saldo), com a pessoa como dona: é contagem de verdade, não
+// um registro paralelo.
+export async function iniciarContagemAvulsa(
+  input: ContagemAvulsaInput
+): Promise<{ criados: number; jaAbertos: number; local: string }> {
+  const usuario = await prisma.usuario.findUnique({ where: { id: input.usuarioId } });
+  if (!usuario) throw new Error('Usuário não encontrado.');
+
+  if (!localVisivelPara(input.localCodigo, usuario.filial)) {
+    throw new Error(
+      `O local ${input.localCodigo} não é da loja ${labelFilial(usuario.filial)} — confira a etiqueta.`
+    );
+  }
+
+  const itens = await getItensComSaldoDoLocal(input.localCodigo);
+  if (itens.length === 0) {
+    throw new Error('Esse endereço não tem saldo no Sankhya — não há o que contar aqui.');
+  }
+  if (ehLocalDeQuarentena(itens[0].local)) {
+    throw new Error(`${itens[0].local} é área de quarentena — produto em quarentena não entra na contagem.`);
+  }
+
+  const empresaCodigo = itens[0].empresaCodigo;
+  const novos = await somenteForaDeContagemAberta(itens, empresaCodigo);
+  const jaAbertos = itens.length - novos.length;
+
+  if (novos.length === 0) {
+    return { criados: 0, jaAbertos, local: itens[0].local };
+  }
+
+  const ciclo = await garantirCicloAberto(input.usuarioId);
+  const pai = await getPaiDoLocal(input.localCodigo);
+
+  await prisma.contagemItem.createMany({
+    data: novos.map((i) => {
+      const { rua, predio, nivel } = resolverLocalizacao(i.local, pai, ehLocalPaiAgrupador);
+      return {
+        cicloId: ciclo.id,
+        empresaCodigo: i.empresaCodigo,
+        empresaNome: i.empresaNome,
+        codigoProduto: i.codigoProduto,
+        descricao: i.descricao,
+        unidade: i.unidade,
+        local: i.local,
+        localCodigo: i.localCodigo,
+        quantidadeEsperada: i.quantidadeDisponivel,
+        quantidadeTotal: i.quantidadeTotal,
+        quantidadeReservada: i.quantidadeReservada,
+        dataSaldo: new Date(),
+        status: 'PENDENTE',
+        rua,
+        predio,
+        nivel,
+        atribuidoParaId: input.usuarioId,
+        // Atribuiu a si mesma: é o que diferencia a avulsa da distribuída.
+        atribuidoPorId: input.usuarioId,
+      };
+    }),
+  });
+
+  await criarNotificacao(
+    'ATRIBUICAO_CONTAGEM',
+    `${empresaCodigo}|avulsa|${input.localCodigo}`,
+    'Contagem avulsa iniciada',
+    `${usuario.nome} começou a contar ${itens[0].local} por conta própria (${novos.length} ite${novos.length === 1 ? 'm' : 'ns'}).`
+  );
+
+  return { criados: novos.length, jaAbertos, local: itens[0].local };
 }
