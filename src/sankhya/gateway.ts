@@ -39,15 +39,33 @@ function ehFalhaDeAutorizacao(erro: unknown): boolean {
   );
 }
 
-export async function executarQuery<T = Record<string, unknown>>(sql: string): Promise<T[]> {
-  try {
-    return await executarUmaVez<T>(sql);
-  } catch (erro) {
-    if (!ehFalhaDeAutorizacao(erro)) throw erro;
+// O gateway trabalha numa sessão HTTP só, e o Sankhya RECUSA duas consultas
+// simultâneas nela: "O serviço foi cancelado por situação de concorrência.
+// Essa mesma sessão HTTP fez a requisição duas vezes simultaneamente."
+//
+// Não é erro de quem chama — é limite do serviço. Então a fila fica aqui, e
+// não espalhada em cada chamador lembrando de não usar Promise.all. Cada
+// consulta espera a anterior terminar; o `catch` vazio impede que uma falha
+// trave a fila pras seguintes.
+let fila: Promise<unknown> = Promise.resolve();
 
-    invalidarTokenSankhya();
-    return executarUmaVez<T>(sql);
-  }
+function enfileirar<T>(tarefa: () => Promise<T>): Promise<T> {
+  const resultado = fila.then(tarefa, tarefa);
+  fila = resultado.catch(() => undefined);
+  return resultado;
+}
+
+export async function executarQuery<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  return enfileirar(async () => {
+    try {
+      return await executarUmaVez<T>(sql);
+    } catch (erro) {
+      if (!ehFalhaDeAutorizacao(erro)) throw erro;
+
+      invalidarTokenSankhya();
+      return executarUmaVez<T>(sql);
+    }
+  });
 }
 
 async function executarUmaVez<T>(sql: string): Promise<T[]> {
