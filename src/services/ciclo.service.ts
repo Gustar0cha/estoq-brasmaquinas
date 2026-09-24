@@ -135,6 +135,15 @@ export async function abrirCiclo(input: {
   return montarDTO(ciclo, { total: 0, contados: 0, divergencias: 0 });
 }
 
+// Tira qualquer aviso de fechamento anterior antes de escrever o novo.
+const AVISO_PENDENTES = /\s*Fechada com \d+ item\(ns\) sem contar\./g;
+
+function montarObservacao(atual: string | null, pendentes: number): string | null {
+  const limpa = (atual ?? '').replace(AVISO_PENDENTES, '').trim();
+  if (pendentes === 0) return limpa || null;
+  return [limpa, `Fechada com ${pendentes} item(ns) sem contar.`].filter(Boolean).join(' ');
+}
+
 export async function fecharCiclo(id: string, fechadoPorId: string): Promise<CicloDTO> {
   const ciclo = await prisma.cicloContagem.findUnique({ where: { id } });
   if (!ciclo) throw new Error('Contagem não encontrada.');
@@ -153,12 +162,10 @@ export async function fecharCiclo(id: string, fechadoPorId: string): Promise<Cic
       status: 'FECHADO',
       fechadoEm: new Date(),
       fechadoPorId,
-      observacao:
-        pendentes > 0
-          ? [ciclo.observacao, `Fechada com ${pendentes} item(ns) sem contar.`]
-              .filter(Boolean)
-              .join(' ')
-          : ciclo.observacao,
+      // Reabrir e fechar de novo acontece (o gestor fecha, aparece algo, ele
+      // reabre). Acumular a frase deixava a observação com três "Fechada com
+      // N sem contar" contraditórios — fica só o do fechamento atual.
+      observacao: montarObservacao(ciclo.observacao, pendentes),
     },
     include: { abertoPor: true, fechadoPor: true },
   });
