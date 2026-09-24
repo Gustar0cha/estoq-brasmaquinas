@@ -953,7 +953,21 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     throw new Error('Essa contagem já foi enviada.');
   }
 
-  const diferenca = input.quantidadeConferida - item.quantidadeEsperada;
+  // Reservado na prateleira ou já separado? Depende de a separação ter
+  // acontecido, e o sistema não sabe disso. Medindo as contagens reais: de 36
+  // itens com reserva, 23 bateram com o disponível (o reservado tinha saído) e
+  // 7 com o total (ainda estava lá). Nenhuma das duas regras sozinha está
+  // certa, então as duas contam como acerto — o contrário é acusar quem contou
+  // corretamente uma prateleira que ainda não foi separada.
+  //
+  // O preço é não detectar um erro que seja exatamente do tamanho da reserva.
+  // Acusar gente certa custa mais: é o que faz o time parar de confiar no
+  // número e conferir tudo de novo por fora.
+  const bateuDisponivel = input.quantidadeConferida === item.quantidadeEsperada;
+  const bateuTotal =
+    item.quantidadeTotal !== null && input.quantidadeConferida === item.quantidadeTotal;
+  const diferenca =
+    bateuDisponivel || bateuTotal ? 0 : input.quantidadeConferida - item.quantidadeEsperada;
   // Item fora do lugar quase sempre diverge (o sistema esperava 0 ali), e o
   // motivo já é conhecido — não faz sentido cobrar do colaborador.
   const motivo = item.divergenciaLocal
@@ -1546,4 +1560,40 @@ export async function iniciarContagemAvulsa(
   );
 
   return { criados: novos.length, jaAbertos, local: itens[0].local };
+}
+
+// ---------------------------------------------------------------------------
+// Apagar contagens
+// ---------------------------------------------------------------------------
+
+// Apaga itens de contagem escolhidos a dedo. Existe porque sobrou lixo de
+// épocas anteriores (itens criados a partir da cópia de estoque, que mandam
+// contar prateleira vazia) e porque um erro de atribuição não deveria ficar
+// pra sempre inflando a divergência do inventário.
+//
+// Registra quem apagou e o que foi apagado: é contagem de gente, não rascunho.
+export async function apagarContagemItens(
+  ids: string[],
+  usuarioId: string
+): Promise<{ apagados: number }> {
+  if (ids.length === 0) throw new Error('Escolha ao menos um item para apagar.');
+
+  const itens = await prisma.contagemItem.findMany({ where: { id: { in: ids } } });
+  if (itens.length === 0) throw new Error('Nenhum dos itens escolhidos existe mais.');
+
+  const contados = itens.filter((i) => i.quantidadeConferida !== null).length;
+  await prisma.contagemItem.deleteMany({ where: { id: { in: itens.map((i) => i.id) } } });
+
+  const nome = await nomeUsuario(usuarioId);
+  await criarNotificacao(
+    'CONTAGEM_APAGADA',
+    itens[0].id,
+    'Contagem apagada',
+    `${nome} apagou ${itens.length} ite${itens.length === 1 ? 'm' : 'ns'} da contagem` +
+      (contados > 0
+        ? `, ${contados} deles já contado(s). Essas contagens saíram do histórico.`
+        : ' que ninguém tinha contado ainda.')
+  );
+
+  return { apagados: itens.length };
 }

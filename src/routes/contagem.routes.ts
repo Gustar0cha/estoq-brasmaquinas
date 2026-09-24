@@ -508,3 +508,23 @@ contagemRouter.post('/avulsa', autenticar, async (req, res) => {
       .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a contagem.' });
   }
 });
+
+const apagarItensSchema = z.object({ ids: z.array(z.string().min(1)).min(1) });
+
+// Apagar é definitivo e tira contagem já registrada do histórico, então é só
+// admin — e o service deixa o registro de quem apagou.
+contagemItensRouter.post('/apagar', autenticar, exigirAdmin, async (req, res) => {
+  const parse = apagarItensSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Escolha ao menos um item para apagar.' });
+    return;
+  }
+
+  try {
+    res.json(await contagemService.apagarContagemItens(parse.data.ids, req.usuario!.sub));
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível apagar.' });
+  }
+});
