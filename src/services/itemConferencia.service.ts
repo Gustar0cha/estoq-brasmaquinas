@@ -22,6 +22,8 @@ export interface ItemAgrupadoDTO {
   unidade: string;
   local: string;
   localCodigo: string;
+  // O saldo do local AGORA (TGFEST, lido a cada consulta). Muda sozinho
+  // quando entra nota ou alguém ajusta o produto no Sankhya.
   quantidadeEsperada: number;
   status: StatusConferencia;
   atribuidoPara: string | null;
@@ -29,6 +31,11 @@ export interface ItemAgrupadoDTO {
 
   // 1ª contagem
   quantidadeConferida: number | null;
+  // O saldo que o sistema dizia NA HORA em que a pessoa contou. É contra
+  // este número que `diferenca` foi calculada — e não contra
+  // `quantidadeEsperada`, que a essa altura já pode ter mudado. Sem ele a
+  // tela mostrava "esperado 74, contado 74, diferença -34".
+  quantidadeEsperadaNaContagem: number | null;
   diferenca: number | null;
   motivo?: string;
   observacao?: string;
@@ -43,6 +50,7 @@ export interface ItemAgrupadoDTO {
   segundaContagemSolicitada: boolean;
   segundaContagemAtribuidaPara?: string | null;
   quantidadeConferida2?: number;
+  quantidadeEsperadaNaContagem2?: number;
   diferenca2?: number;
   motivo2?: string;
   observacao2?: string;
@@ -189,6 +197,7 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       atribuidoPara,
 
       quantidadeConferida: contagem1?.quantidadeConferida ?? null,
+      quantidadeEsperadaNaContagem: contagem1?.quantidadeEsperada ?? null,
       diferenca: contagem1?.diferenca ?? null,
       motivo: contagem1?.motivo ?? undefined,
       observacao: contagem1?.observacao ?? undefined,
@@ -202,6 +211,7 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       segundaContagemSolicitada: Boolean(solicitacao),
       segundaContagemAtribuidaPara: solicitacao?.usuarioId ?? null,
       quantidadeConferida2: contagem2?.quantidadeConferida ?? undefined,
+      quantidadeEsperadaNaContagem2: contagem2?.quantidadeEsperada ?? undefined,
       diferenca2: contagem2?.diferenca ?? undefined,
       motivo2: contagem2?.motivo ?? undefined,
       observacao2: contagem2?.observacao ?? undefined,
@@ -466,7 +476,9 @@ export async function getDivergenciasItens(): Promise<DivergenciaItemDTO[]> {
     codigoProduto: item.codigoProduto,
     descricao: item.descricao,
     local: item.local,
-    quantidadeEsperada: item.quantidadeEsperada,
+    // O esperado da HORA da contagem, não o saldo de agora: é esse que
+    // fecha a conta com `diferenca`.
+    quantidadeEsperada: item.quantidadeEsperadaNaContagem ?? item.quantidadeEsperada,
     quantidadeConferida: item.quantidadeConferida!,
     diferenca: item.diferenca!,
     motivo: item.motivo ?? '',
