@@ -29,14 +29,21 @@ async function filialDoRequisitante(usuarioId?: string): Promise<string | null> 
   return usuario?.filial ?? null;
 }
 
+// `cicloId` recorta num inventário. Sem ele o painel soma TODAS as contagens
+// já feitas, o que mistura inventários diferentes num número só.
+function cicloDaQuery(query: unknown): string | undefined {
+  const { cicloId } = (query ?? {}) as { cicloId?: unknown };
+  return typeof cicloId === 'string' && cicloId ? cicloId : undefined;
+}
+
 contagemRouter.get('/indicadores', autenticar, exigirAdmin, async (req, res) => {
   const filial = await filialDoRequisitante(req.usuario?.sub);
-  res.json(await contagemService.getIndicadoresContagem(filial));
+  res.json(await contagemService.getIndicadoresContagem(filial, cicloDaQuery(req.query)));
 });
 
 contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (req, res) => {
   const filial = await filialDoRequisitante(req.usuario?.sub);
-  res.json(await contagemService.getProgressoContagemPorPredio(filial));
+  res.json(await contagemService.getProgressoContagemPorPredio(filial, cicloDaQuery(req.query)));
 });
 
 contagemRouter.get('/locais', autenticar, exigirAdmin, async (req, res) => {

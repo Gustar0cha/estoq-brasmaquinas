@@ -1088,11 +1088,17 @@ export interface IndicadoresContagemDTO {
   segundaEmAndamento: number;
 }
 
-export async function getIndicadoresContagem(filial?: string | null): Promise<IndicadoresContagemDTO> {
+export async function getIndicadoresContagem(
+  filial?: string | null,
+  cicloId?: string
+): Promise<IndicadoresContagemDTO> {
   const grupos = await prisma.contagemItem.groupBy({
     by: ['status'],
     _count: { _all: true },
-    where: ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {},
+    where: {
+      ...(ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {}),
+      ...(cicloId ? { cicloId } : {}),
+    },
   });
   const mapa = Object.fromEntries(grupos.map((g) => [g.status, g._count._all]));
 
@@ -1132,9 +1138,15 @@ export interface ProgressoPredio {
   colaboradores: ProgressoPredioColaborador[];
 }
 
-export async function getProgressoContagemPorPredio(filial?: string | null): Promise<ProgressoPredio[]> {
+export async function getProgressoContagemPorPredio(
+  filial?: string | null,
+  cicloId?: string
+): Promise<ProgressoPredio[]> {
   const itens = await prisma.contagemItem.findMany({
-    where: ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {},
+    where: {
+      ...(ehFilial(filial) ? { localCodigo: { startsWith: prefixoDaFilial(filial) } } : {}),
+      ...(cicloId ? { cicloId } : {}),
+    },
     select: {
       rua: true,
       predio: true,
