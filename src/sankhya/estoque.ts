@@ -221,10 +221,119 @@ export async function getItensComSaldoPorLocais(
   });
 }
 
-// Saldo de um produto+local específico. Usado quando o colaborador bipa um
-// item que não estava na lista dele (item fora do lugar): aí não se sabe a
-// empresa de antemão, então traz a linha de qualquer empresa que tenha saldo.
-export async function getSaldoDoItem(
+export interface SaldoTotalProduto {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  quantidadeTotal: number;
+  quantidadeReservada: number;
+  quantidadeDisponivel: number;
+  locais: number;
+}
+
+// Saldo do produto somado em TODOS os endereços, sem endereço nenhum na
+// conta. É contra este número que a contagem avulsa é conferida: ali o
+// operador conta o produto, não a prateleira.
+//
+// `prefixoFilial` recorta pelos locais da loja de quem está contando — quem
+// é da Lapa não confere o que está guardado em Guanambi. A empresa devolvida
+// é a que tem mais saldo do produto dentro desse recorte.
+export async function getSaldoTotalDoProduto(
+  codigoProduto: string,
+  prefixoFilial?: string
+): Promise<SaldoTotalProduto | null> {
+  const produto = Number(codigoProduto);
+  if (!Number.isFinite(produto)) return null;
+
+  const recorte =
+    prefixoFilial && /^[0-9]$/.test(prefixoFilial)
+      ? `AND TO_CHAR(S.CODLOCAL) LIKE '${prefixoFilial}%'`
+      : '';
+
+  const linhas = await executarQuery<{
+    codigoProduto: number;
+    descricao: string;
+    unidade: string | null;
+    empresaCodigo: number;
+    empresaNome: string | null;
+    quantidadeTotal: number;
+    quantidadeReservada: number;
+    locais: number;
+  }>(`
+    SELECT
+      MAX(PRO.CODPROD)      AS "codigoProduto",
+      MAX(PRO.DESCRPROD)    AS "descricao",
+      MAX(PRO.CODVOL)       AS "unidade",
+      S.CODEMP              AS "empresaCodigo",
+      MAX(EMP.NOMEFANTASIA) AS "empresaNome",
+      NVL(SUM(S.TOTAL), 0)      AS "quantidadeTotal",
+      NVL(SUM(S.RESERVADO), 0)  AS "quantidadeReservada",
+      COUNT(DISTINCT S.CODLOCAL) AS "locais"
+    FROM (${SUBCONSULTA_SALDO}) S
+    INNER JOIN TGFPRO PRO ON S.CODPROD = PRO.CODPROD
+    LEFT JOIN TSIEMP EMP ON S.CODEMP = EMP.CODEMP
+    WHERE S.CODPROD = ${produto}
+      ${recorte}
+    GROUP BY S.CODEMP
+    ORDER BY SUM(S.TOTAL) DESC
+    FETCH NEXT 1 ROWS ONLY
+  `);
+
+  if (linhas.length === 0) {
+    // Produto sem saldo em lugar nenhum ainda precisa ser contável: o
+    // operador pode estar justamente registrando que achou o que o sistema
+    // diz não existir.
+    const so = await executarQuery<{ codigoProduto: number; descricao: string; unidade: string | null }>(`
+      SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
+      FROM TGFPRO PRO WHERE PRO.CODPROD = ${produto}
+    `);
+    if (so.length === 0) return null;
+    return {
+      codigoProduto: String(so[0].codigoProduto),
+      descricao: so[0].descricao,
+      unidade: so[0].unidade ?? '',
+      empresaCodigo: '1',
+      empresaNome: 'Empresa 1',
+      quantidadeTotal: 0,
+      quantidadeReservada: 0,
+      quantidadeDisponivel: 0,
+      locais: 0,
+    };
+  }
+
+  const l = linhas[0];
+  const total = Number(l.quantidadeTotal) || 0;
+  const reservada = Number(l.quantidadeReservada) || 0;
+  return {
+    codigoProduto: String(l.codigoProduto),
+    descricao: l.descricao,
+    unidade: l.unidade ?? '',
+    empresaCodigo: String(l.empresaCodigo),
+    empresaNome: l.empresaNome ?? `Empresa ${l.empresaCodigo}`,
+    quantidadeTotal: total,
+    quantidadeReservada: reservada,
+    quantidadeDisponivel: Math.max(0, total - reservada),
+    locais: Number(l.locais) || 0,
+  };
+}
+
+// Produto + local SEM exigir saldo ali. É o caso do item fora do lugar: o
+// colaborador achou na prateleira um produto que o Sankhya não tem naquele
+// endereço — e a consulta que existia aqui filtrava `HAVING SUM(ESTOQUE) > 0`,
+// então nunca devolvia justamente esse item. Na prática a tela só aceitava
+// registrar o que NÃO estava fora do lugar.
+//
+// A empresa é decidida nesta ordem: a da linha de estoque do próprio produto
+// naquele local, se existir; senão a que mais guarda coisa naquela prateleira;
+// senão a que mais tem o produto em outro lugar; senão 1. Um mesmo local pode
+// ter saldo de duas empresas (o "GERAL LEM" tem da Lapa e da LEM), e pegar a
+// primeira que aparecesse atribuía a contagem à loja errada.
+//
+// O saldo devolvido é o que o Sankhya realmente diz do par — zero quando não
+// diz nada, que é o caso do item fora do lugar.
+export async function getItemForaDoLugar(
   codigoProduto: string,
   localCodigo: string
 ): Promise<ItemComSaldoSankhya | null> {
@@ -233,13 +342,55 @@ export async function getSaldoDoItem(
   if (!Number.isFinite(produto) || !Number.isFinite(local)) return null;
 
   const linhas = await executarQuery<LinhaItemComSaldo>(`
-    SELECT ${CAMPOS_ITEM}
-    FROM (${SUBCONSULTA_SALDO}) S
-    ${JUNCOES_ITEM}
-    WHERE S.CODPROD = ${produto} AND S.CODLOCAL = ${local}
-    GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
-    ORDER BY MAX(S.TOTAL) DESC
-    OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY
+    SELECT
+      PRO.CODPROD          AS "codigoProduto",
+      PRO.DESCRPROD        AS "descricao",
+      PRO.CODVOL           AS "unidade",
+      ${local}             AS "localCodigo",
+      COALESCE(LOC.DESCRLOCAL, TO_CHAR(${local})) AS "local",
+      EMPRESA.CODEMP       AS "empresaCodigo",
+      EMP.NOMEFANTASIA     AS "empresaNome",
+      PRO.MARCA            AS "marca",
+      PRO.CODGRUPOPROD     AS "grupoCodigo",
+      GRU.DESCRGRUPOPROD   AS "grupo",
+      NVL(SALDO.TOTAL, 0)      AS "quantidadeTotal",
+      NVL(SALDO.RESERVADO, 0)  AS "quantidadeReservada"
+    FROM TGFPRO PRO
+    LEFT JOIN TGFGRU GRU ON PRO.CODGRUPOPROD = GRU.CODGRUPOPROD
+    LEFT JOIN TGFLOC LOC ON LOC.CODLOCAL = ${local}
+    CROSS JOIN (
+      SELECT NVL(MIN(CODEMP), 1) AS CODEMP FROM (
+        SELECT CODEMP FROM (
+          -- 1) a própria linha do produto ali; 2) quem mais ocupa a
+          -- prateleira; 3) onde o produto está em outro lugar.
+          SELECT E.CODEMP, 1 AS PRIORIDADE, SUM(E.ESTOQUE) AS PESO
+          FROM TGFEST E
+          WHERE E.CODPROD = ${produto} AND E.CODLOCAL = ${local}
+          GROUP BY E.CODEMP
+          UNION ALL
+          SELECT E.CODEMP, 2 AS PRIORIDADE, SUM(E.ESTOQUE) AS PESO
+          FROM TGFEST E
+          WHERE E.CODLOCAL = ${local} AND E.ESTOQUE > 0
+          GROUP BY E.CODEMP
+          UNION ALL
+          SELECT E.CODEMP, 3 AS PRIORIDADE, SUM(E.ESTOQUE) AS PESO
+          FROM TGFEST E
+          WHERE E.CODPROD = ${produto} AND E.ESTOQUE > 0
+          GROUP BY E.CODEMP
+        )
+        ORDER BY PRIORIDADE, PESO DESC, CODEMP
+        FETCH NEXT 1 ROWS ONLY
+      )
+    ) EMPRESA
+    LEFT JOIN TSIEMP EMP ON EMP.CODEMP = EMPRESA.CODEMP
+    LEFT JOIN (
+      SELECT
+        NVL(SUM(E3.ESTOQUE), 0)   AS TOTAL,
+        NVL(SUM(E3.RESERVADO), 0) AS RESERVADO
+      FROM TGFEST E3
+      WHERE E3.CODPROD = ${produto} AND E3.CODLOCAL = ${local}
+    ) SALDO ON 1 = 1
+    WHERE PRO.CODPROD = ${produto}
   `);
 
   return linhas.length > 0 ? montarItem(linhas[0]) : null;

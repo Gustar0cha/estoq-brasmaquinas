@@ -501,20 +501,26 @@ contagemItensRouter.post('/:id/nao-encontrado', autenticar, async (req, res) => 
   }
 });
 
-const avulsaSchema = z.object({ localCodigo: z.string().min(1) });
+const avulsaSchema = z.object({
+  codigoProduto: z.string().min(1),
+  quantidadeConferida: z.coerce.number().min(0),
+  tarefaNome: z.string().trim().max(80).optional(),
+  motivo: z.string().trim().max(200).optional(),
+  observacao: z.string().trim().max(500).optional(),
+});
 
-// Contagem avulsa: o operador bipa a prateleira e conta o que está nela, sem
-// esperar o admin distribuir.
+// Contagem avulsa: produto e quantidade, sem endereço. A conferência é
+// contra o saldo do produto somado nos locais da loja de quem conta.
 contagemRouter.post('/avulsa', autenticar, async (req, res) => {
   const parse = avulsaSchema.safeParse(req.body);
   if (!parse.success) {
-    res.status(400).json({ erro: 'Informe o código do local.' });
+    res.status(400).json({ erro: 'Informe o produto e a quantidade contada.' });
     return;
   }
 
   try {
-    const resultado = await contagemService.iniciarContagemAvulsa({
-      localCodigo: parse.data.localCodigo,
+    const resultado = await contagemService.registrarContagemAvulsa({
+      ...parse.data,
       usuarioId: req.usuario!.sub,
     });
     res.status(201).json(resultado);

@@ -11,11 +11,11 @@ import {
   getCustosSemIcms,
 } from '../sankhya/client';
 import {
-  getItensComSaldoDoLocal,
   getItensComSaldoPorLocais,
   getLocaisComSaldo,
   getPedidosQueReservam,
-  getSaldoDoItem,
+  getItemForaDoLugar,
+  getSaldoTotalDoProduto,
   PedidoQueReserva,
 } from '../sankhya/estoque';
 import {
@@ -810,9 +810,11 @@ export async function registrarItemForaDoLugar(
     );
   }
 
-  const base = await getSaldoDoItem(input.codigoProduto, input.codigoLocalBipado);
+  // Sem exigir saldo no local bipado: o item fora do lugar é, por definição,
+  // o produto que o Sankhya NÃO tem naquele endereço.
+  const base = await getItemForaDoLugar(input.codigoProduto, input.codigoLocalBipado);
   if (!base) {
-    throw new Error('Não achei esse produto ou esse local no Sankhya. Confira os códigos.');
+    throw new Error('Não achei esse produto no Sankhya. Confira o código do produto.');
   }
   if (ehLocalDeQuarentena(base.local)) {
     throw new Error(`${base.local} é área de quarentena — produto em quarentena não entra na contagem.`);
@@ -1606,83 +1608,95 @@ export async function registrarNaoEncontrado(
 // ---------------------------------------------------------------------------
 
 export interface ContagemAvulsaInput {
-  localCodigo: string;
   usuarioId: string;
+  codigoProduto: string;
+  quantidadeConferida: number;
+  // Rótulo do lote, pra achar essas contagens depois na aba Contagens.
+  tarefaNome?: string;
+  motivo?: string;
+  observacao?: string;
 }
 
-// Bipou a prateleira, conta o que está nela. Serve pra quem terminou a lista
-// e quer seguir, e pra endereço que o admin ainda não distribuiu — que hoje
-// são a maioria.
+// Contagem avulsa: produto e quantidade, sem endereço nenhum.
 //
-// Os itens nascem exatamente como os de uma atribuição normal (mesmo ciclo,
-// mesma regra de saldo), com a pessoa como dona: é contagem de verdade, não
-// um registro paralelo.
-export async function iniciarContagemAvulsa(
+// Antes ela pedia o bipe da prateleira e trazia os itens daquele local — o
+// que entregava ao operador a lista do que o sistema achava que estava ali.
+// Agora ele digita o produto e o quanto contou, e nada do sistema aparece na
+// tela: a contagem é cega de ponta a ponta.
+//
+// Sem endereço, o que sobra pra conferir é o saldo do PRODUTO somado em
+// todos os locais da loja dele. Vale a mesma regra de reserva da contagem
+// normal: bater com o disponível OU com o total conta como acerto.
+export async function registrarContagemAvulsa(
   input: ContagemAvulsaInput
-): Promise<{ criados: number; jaAbertos: number; local: string }> {
+): Promise<{ item: ContagemItemDTO; esperado: number; locais: number }> {
   const usuario = await prisma.usuario.findUnique({ where: { id: input.usuarioId } });
   if (!usuario) throw new Error('Usuário não encontrado.');
-
-  if (!localVisivelPara(input.localCodigo, usuario.filial)) {
-    throw new Error(
-      `O local ${input.localCodigo} não é da loja ${labelFilial(usuario.filial)} — confira a etiqueta.`
-    );
+  if (!Number.isFinite(input.quantidadeConferida) || input.quantidadeConferida < 0) {
+    throw new Error('Informe a quantidade contada.');
   }
 
-  const itens = await getItensComSaldoDoLocal(input.localCodigo);
-  if (itens.length === 0) {
-    throw new Error('Esse endereço não tem saldo no Sankhya — não há o que contar aqui.');
-  }
-  if (ehLocalDeQuarentena(itens[0].local)) {
-    throw new Error(`${itens[0].local} é área de quarentena — produto em quarentena não entra na contagem.`);
-  }
+  const prefixo = ehFilial(usuario.filial) ? prefixoDaFilial(usuario.filial) : undefined;
+  const base = await getSaldoTotalDoProduto(input.codigoProduto, prefixo);
+  if (!base) throw new Error('Não achei esse produto no Sankhya. Confira o código.');
 
-  const empresaCodigo = itens[0].empresaCodigo;
-  const novos = await somenteForaDeContagemAberta(itens, empresaCodigo);
-  const jaAbertos = itens.length - novos.length;
+  const bateuDisponivel = input.quantidadeConferida === base.quantidadeDisponivel;
+  const bateuTotal = input.quantidadeConferida === base.quantidadeTotal;
+  const diferenca =
+    bateuDisponivel || bateuTotal ? 0 : input.quantidadeConferida - base.quantidadeDisponivel;
 
-  if (novos.length === 0) {
-    return { criados: 0, jaAbertos, local: itens[0].local };
-  }
+  // O código do local carrega o prefixo da loja porque é dele que sai a
+  // filial em todo o resto do sistema (ver src/lib/filiais.ts). Sem isso a
+  // contagem avulsa sumiria dos filtros por loja.
+  const localCodigo = `${prefixo ?? ''}AVULSA`;
 
   const ciclo = await garantirCicloAberto(input.usuarioId);
-  const pai = await getPaiDoLocal(input.localCodigo);
+  const agora = new Date();
 
-  await prisma.contagemItem.createMany({
-    data: novos.map((i) => {
-      const { rua, predio, nivel } = resolverLocalizacao(i.local, pai, ehLocalPaiAgrupador);
-      return {
-        cicloId: ciclo.id,
-        empresaCodigo: i.empresaCodigo,
-        empresaNome: i.empresaNome,
-        codigoProduto: i.codigoProduto,
-        descricao: i.descricao,
-        unidade: i.unidade,
-        local: i.local,
-        localCodigo: i.localCodigo,
-        quantidadeEsperada: i.quantidadeDisponivel,
-        quantidadeTotal: i.quantidadeTotal,
-        quantidadeReservada: i.quantidadeReservada,
-        dataSaldo: new Date(),
-        status: 'PENDENTE',
-        rua,
-        predio,
-        nivel,
-        atribuidoParaId: input.usuarioId,
-        // Atribuiu a si mesma: é o que diferencia a avulsa da distribuída.
-        atribuidoPorId: input.usuarioId,
-      };
-    }),
+  const criado = await prisma.contagemItem.create({
+    data: {
+      cicloId: ciclo.id,
+      empresaCodigo: base.empresaCodigo,
+      empresaNome: base.empresaNome,
+      codigoProduto: base.codigoProduto,
+      descricao: base.descricao,
+      unidade: base.unidade,
+      local: 'Contagem avulsa (sem endereço)',
+      localCodigo,
+      quantidadeEsperada: base.quantidadeDisponivel,
+      quantidadeTotal: base.quantidadeTotal,
+      quantidadeReservada: base.quantidadeReservada,
+      dataSaldo: agora,
+      rua: null,
+      predio: null,
+      nivel: null,
+      tarefaNome: input.tarefaNome?.trim() || null,
+      status: diferenca === 0 ? 'CONFERIDA' : 'DIVERGENCIA',
+      atribuidoParaId: input.usuarioId,
+      atribuidoPorId: input.usuarioId,
+      iniciadoPorId: input.usuarioId,
+      iniciadoEm: agora,
+      quantidadeConferida: input.quantidadeConferida,
+      diferenca,
+      motivo: diferenca !== 0 ? (input.motivo ?? 'Contagem avulsa') : null,
+      observacao: input.observacao?.trim() || null,
+      conferidoPorId: input.usuarioId,
+      dataConferencia: agora,
+    },
   });
 
+  const nome = await nomeUsuario(input.usuarioId);
   await criarNotificacao(
-    'ATRIBUICAO_CONTAGEM',
-    `${empresaCodigo}|avulsa|${input.localCodigo}`,
-    'Contagem avulsa iniciada',
-    `${usuario.nome} começou a contar ${itens[0].local} por conta própria (${novos.length} ite${novos.length === 1 ? 'm' : 'ns'}).`
+    diferenca === 0 ? 'FIM_CONTAGEM' : 'DIVERGENCIA',
+    criado.id,
+    diferenca === 0 ? 'Contagem avulsa registrada' : 'Divergência em contagem avulsa',
+    `${nome} contou ${input.quantidadeConferida} de ${base.descricao}` +
+      (diferenca === 0
+        ? '.'
+        : ` — o sistema tem ${base.quantidadeDisponivel} em ${base.locais} local(is).`)
   );
 
-  return { criados: novos.length, jaAbertos, local: itens[0].local };
+  return { item: montarContagemItemDTO(criado), esperado: base.quantidadeDisponivel, locais: base.locais };
 }
 
 // ---------------------------------------------------------------------------
