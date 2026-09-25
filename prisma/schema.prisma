@@ -343,6 +343,11 @@ model ContagemItem {
   atribuidoPor    Usuario? @relation("ContagemAtribuidaPor", fields: [atribuidoPorId], references: [id])
   atribuidoPorId  String?
   atribuidoEm     DateTime @default(now())
+  // Nome que o admin deu à tarefa na hora de atribuir ("Rua 2 manhã",
+  // "Recontagem do Aldir"). É só um rótulo pra encontrar o lote depois na
+  // aba Contagens — sem ele o gestor só tem rua/prédio pra se orientar, e
+  // dois lotes do mesmo prédio ficam indistinguíveis.
+  tarefaNome      String?
 
   // 1ª contagem
   quantidadeConferida    Int?

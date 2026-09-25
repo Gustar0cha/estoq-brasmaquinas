@@ -46,6 +46,10 @@ contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (req, re
   res.json(await contagemService.getProgressoContagemPorPredio(filial, cicloDaQuery(req.query)));
 });
 
+contagemRouter.get('/tarefas', autenticar, exigirAdmin, async (req, res) => {
+  res.json(await contagemService.getTarefasDaContagem(cicloDaQuery(req.query)));
+});
+
 contagemRouter.get('/locais', autenticar, exigirAdmin, async (req, res) => {
   const { empresa } = req.query;
   const filial = await filialDoRequisitante(req.usuario?.sub);
@@ -81,6 +85,8 @@ const atribuirContagemSchema = z.object({
   grupos: z.array(z.string()).optional(),
   custoMinimo: z.coerce.number().optional(),
   custoMaximo: z.coerce.number().optional(),
+  // Rótulo do lote pra achar a tarefa depois na aba Contagens.
+  tarefaNome: z.string().trim().max(80).optional(),
 });
 
 contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
@@ -169,9 +175,10 @@ contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, 
 // ---- Itens de contagem (/contagem-itens) -------------------------------
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
-  const { status, atribuidoPara, dataInicio, dataFim } = req.query;
+  const { status, atribuidoPara, dataInicio, dataFim, semContagemFechada } = req.query;
 
   const itens = await contagemService.getContagemItens({
+    semContagemFechada: semContagemFechada === 'true',
     status: typeof status === 'string' ? (status as StatusContagemItem) : undefined,
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
     dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
@@ -439,6 +446,8 @@ const atribuirItensSchema = z.object({
     .array(z.object({ codigoProduto: z.string().min(1), localCodigo: z.string().min(1) }))
     .min(1),
   atribuidoParaId: z.string().min(1),
+  // Rótulo do lote pra achar a tarefa depois na aba Contagens.
+  tarefaNome: z.string().trim().max(80).optional(),
 });
 
 contagemRouter.post('/atribuir-itens', autenticar, exigirAdmin, async (req, res) => {

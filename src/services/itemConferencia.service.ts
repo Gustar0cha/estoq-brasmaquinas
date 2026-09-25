@@ -4,6 +4,7 @@ import { getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
 import { criarNotificacao } from './notificacao.service';
+import { parsearLocalizacao } from '../sankhya/localizacao';
 
 export interface NotaOrigemDTO {
   movimentacaoId: string;
@@ -22,6 +23,12 @@ export interface ItemAgrupadoDTO {
   unidade: string;
   local: string;
   localCodigo: string;
+  // Rua/prédio/nível lidos do nome do local, mesma regra da contagem. O app
+  // agrupa a conferência em tarefas por prédio com isso, em vez de despejar
+  // uma lista solta de produto+local.
+  rua: string | null;
+  predio: string | null;
+  nivel: string | null;
   // O saldo do local AGORA (TGFEST, lido a cada consulta). Muda sozinho
   // quando entra nota ou alguém ajusta o produto no Sankhya.
   quantidadeEsperada: number;
@@ -97,6 +104,9 @@ interface GrupoAcumulado {
   unidade: string;
   local: string;
   localCodigo: string;
+  rua: string | null;
+  predio: string | null;
+  nivel: string | null;
   quantidadeEsperada: number;
   notasOrigem: NotaOrigemDTO[];
 }
@@ -124,6 +134,7 @@ async function agruparPorProdutoLocal(filtro?: { tipo?: TipoMovimentacaoSankhya 
           unidade: item.unidade,
           local: item.local,
           localCodigo,
+          ...parsearLocalizacao(item.local),
           quantidadeEsperada: item.quantidadeEsperada,
           notasOrigem: [],
         };
@@ -191,6 +202,9 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       unidade: grupo.unidade,
       local: grupo.local,
       localCodigo: grupo.localCodigo,
+      rua: grupo.rua,
+      predio: grupo.predio,
+      nivel: grupo.nivel,
       quantidadeEsperada: grupo.quantidadeEsperada,
       notasOrigem: grupo.notasOrigem,
       status,

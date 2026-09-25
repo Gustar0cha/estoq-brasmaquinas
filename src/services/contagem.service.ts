@@ -84,6 +84,7 @@ export interface ContagemItemDTO {
   atribuidoPara: string | null;
   atribuidoPorId?: string;
   atribuidoEm: string;
+  tarefaNome: string | null;
   iniciadoPorId?: string;
   iniciadoEm?: string;
 
@@ -137,6 +138,10 @@ export interface FiltroContagemItens {
   dataFim?: Date;
   // Inventário. Ausente = todos.
   cicloId?: string;
+  // Esconde o que pertence a inventário já fechado. É o que a tela do
+  // operador usa: contagem encerrada não é mais trabalho de ninguém, e ficava
+  // ocupando a lista dele junto com a tarefa de hoje.
+  semContagemFechada?: boolean;
   // Loja de quem está pedindo: esconde da lista os locais das outras lojas
   // (o prefixo do CODLOCAL é que diz a filial — ver src/lib/filiais.ts).
   filial?: string | null;
@@ -177,6 +182,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     atribuidoPara,
     atribuidoPorId: item.atribuidoPorId ?? undefined,
     atribuidoEm: item.atribuidoEm.toISOString(),
+    tarefaNome: item.tarefaNome ?? null,
     iniciadoPorId: item.iniciadoPorId ?? undefined,
     iniciadoEm: item.iniciadoEm?.toISOString(),
 
@@ -330,6 +336,9 @@ export interface AtribuirContagemPredioInput {
   // medindo o trabalho de cada um.
   atribuidoParaIds?: string[];
   atribuidoPorId: string;
+  // Rótulo do lote, dado pelo admin ("Rua 2 manhã"). Só serve pra achar a
+  // tarefa depois na aba Contagens; vazio cai no nome do prédio.
+  tarefaNome?: string;
 }
 
 // Ninguém recebe prateleira de outra loja: se o colaborador tem filial
@@ -439,6 +448,7 @@ export async function atribuirContagemPredio(
       // uma pessoa herdar só o fundo do prédio.
       atribuidoParaId: responsaveis[indice % responsaveis.length],
       atribuidoPorId: input.atribuidoPorId,
+      tarefaNome: input.tarefaNome?.trim() || null,
     })),
   });
 
@@ -463,6 +473,100 @@ export async function atribuirContagemPredio(
   }
 
   return { criados: novos.length };
+}
+
+export interface TarefaContagem {
+  chave: string;
+  nome: string;
+  // Vazio quando o admin não deu nome: a tela mostra o prédio no lugar.
+  nomeado: boolean;
+  locais: string;
+  responsaveis: { usuarioId: string; nome: string; itens: number }[];
+  total: number;
+  contados: number;
+  divergentes: number;
+  atribuidoEm: string;
+}
+
+// As tarefas de um inventário, do jeito que o admin as criou: um lote por
+// atribuição, com o nome que ele deu. Sem isso a aba Contagens só mostrava
+// números do inventário inteiro, e dois lotes do mesmo prédio — o da manhã e
+// o da tarde, de pessoas diferentes — eram indistinguíveis.
+export async function getTarefasDaContagem(cicloId?: string): Promise<TarefaContagem[]> {
+  const itens = await prisma.contagemItem.findMany({
+    where: { ...(cicloId ? { cicloId } : {}) },
+    select: {
+      tarefaNome: true,
+      rua: true,
+      predio: true,
+      status: true,
+      atribuidoParaId: true,
+      atribuidoEm: true,
+      empresaCodigo: true,
+    },
+  });
+
+  const grupos = new Map<
+    string,
+    TarefaContagem & { porUsuario: Map<string, number> }
+  >();
+
+  for (const item of itens) {
+    const nomeado = Boolean(item.tarefaNome);
+    // Lote nomeado é um só, venha de quantos prédios vier. Sem nome, o
+    // agrupamento cai no prédio, que é o que existia antes.
+    const chave = nomeado
+      ? `nome:${item.tarefaNome}`
+      : `predio:${item.empresaCodigo}|${chavePredio(item.rua, item.predio)}`;
+
+    let grupo = grupos.get(chave);
+    if (!grupo) {
+      grupo = {
+        chave,
+        nome: item.tarefaNome ?? rotuloDoGrupo(item.rua, item.predio),
+        nomeado,
+        locais: rotuloDoGrupo(item.rua, item.predio),
+        responsaveis: [],
+        total: 0,
+        contados: 0,
+        divergentes: 0,
+        atribuidoEm: item.atribuidoEm.toISOString(),
+        porUsuario: new Map(),
+      };
+      grupos.set(chave, grupo);
+    }
+
+    grupo.total += 1;
+    if (!STATUS_ABERTOS.includes(item.status as StatusContagemItem)) grupo.contados += 1;
+    if (item.status === 'DIVERGENCIA' || item.status === 'DIVERGENCIA_LOCAL') grupo.divergentes += 1;
+    if (item.atribuidoParaId) {
+      grupo.porUsuario.set(item.atribuidoParaId, (grupo.porUsuario.get(item.atribuidoParaId) ?? 0) + 1);
+    }
+    // O lote vale pela atribuição mais antiga: é quando ele foi criado.
+    if (item.atribuidoEm.toISOString() < grupo.atribuidoEm) {
+      grupo.atribuidoEm = item.atribuidoEm.toISOString();
+    }
+    // Um lote nomeado pode pegar mais de um prédio; o rótulo então vira o
+    // número de endereços em vez de mentir dizendo um só.
+    const rotulo = rotuloDoGrupo(item.rua, item.predio);
+    if (grupo.locais !== rotulo && !grupo.locais.includes('endereços')) {
+      grupo.locais = 'Vários endereços';
+    }
+  }
+
+  const ids = new Set<string>();
+  grupos.forEach((g) => g.porUsuario.forEach((_, id) => ids.add(id)));
+  const usuarios = await prisma.usuario.findMany({ where: { id: { in: Array.from(ids) } } });
+  const nomePorId = new Map(usuarios.map((u) => [u.id, u.nome]));
+
+  return Array.from(grupos.values())
+    .map(({ porUsuario, ...tarefa }) => ({
+      ...tarefa,
+      responsaveis: Array.from(porUsuario.entries())
+        .map(([usuarioId, itens]) => ({ usuarioId, nome: nomePorId.get(usuarioId) ?? 'Alguém', itens }))
+        .sort((a, b) => b.itens - a.itens),
+    }))
+    .sort((a, b) => b.atribuidoEm.localeCompare(a.atribuidoEm));
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1008,11 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
     where: {
       ...(filtro?.status ? { status: filtro.status } : {}),
       ...(filtro?.cicloId ? { cicloId: filtro.cicloId } : {}),
+      // Item sem ciclo é de antes do conceito existir; continua aparecendo,
+      // porque não há inventário fechado pra ele.
+      ...(filtro?.semContagemFechada
+        ? { OR: [{ cicloId: null }, { ciclo: { status: { not: 'FECHADO' } } }] }
+        : {}),
       ...(ehFilial(filtro?.filial)
         ? { localCodigo: { startsWith: prefixoDaFilial(filtro.filial) } }
         : {}),
@@ -1368,6 +1477,7 @@ export interface AtribuirContagemItensInput {
   itens: { codigoProduto: string; localCodigo: string }[];
   atribuidoParaId: string;
   atribuidoPorId: string;
+  tarefaNome?: string;
 }
 
 // Atribui uma seleção avulsa de itens, sem precisar mandar o prédio inteiro.
@@ -1429,6 +1539,7 @@ export async function atribuirContagemItens(
         nivel,
         atribuidoParaId: input.atribuidoParaId,
         atribuidoPorId: input.atribuidoPorId,
+        tarefaNome: input.tarefaNome?.trim() || null,
       };
     }),
   });
