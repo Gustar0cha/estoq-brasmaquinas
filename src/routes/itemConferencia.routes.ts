@@ -172,6 +172,8 @@ itemConferenciaRouter.patch('/atribuicao-em-massa', autenticar, exigirAdmin, asy
   const atribuicaoEmMassaSchema = z.object({
     chaves: z.array(z.string()).min(1),
     usuarioId: z.string().nullable(),
+    // Distribuir já colocando o lote dentro de uma tarefa de Mov. Diária.
+    tarefaId: z.string().optional(),
   });
 
   const parse = atribuicaoEmMassaSchema.safeParse(req.body);
@@ -180,7 +182,11 @@ itemConferenciaRouter.patch('/atribuicao-em-massa', autenticar, exigirAdmin, asy
     return;
   }
 
-  await itemConferenciaService.atribuirItensEmMassa(parse.data.chaves, parse.data.usuarioId);
+  await itemConferenciaService.atribuirItensEmMassa(
+    parse.data.chaves,
+    parse.data.usuarioId,
+    parse.data.tarefaId
+  );
   res.json({ ok: true });
 });
 

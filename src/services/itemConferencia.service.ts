@@ -34,6 +34,9 @@ export interface ItemAgrupadoDTO {
   quantidadeEsperada: number;
   status: StatusConferencia;
   atribuidoPara: string | null;
+  // A tarefa de movimentação diária em que este item está. É o que separa a
+  // conferência de hoje da de ontem no mesmo produto+local.
+  tarefaId: string | null;
   notasOrigem: NotaOrigemDTO[];
 
   // 1ª contagem
@@ -69,6 +72,7 @@ export interface ItemAgrupadoDTO {
 }
 
 export interface FiltroItensAgrupados {
+  tarefaId?: string;
   tipo?: TipoMovimentacaoSankhya;
   status?: StatusConferencia;
   atribuidoPara?: string;
@@ -209,6 +213,7 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       notasOrigem: grupo.notasOrigem,
       status,
       atribuidoPara,
+      tarefaId: atribuicao?.tarefaId ?? contagem1?.tarefaId ?? null,
 
       quantidadeConferida: contagem1?.quantidadeConferida ?? null,
       quantidadeEsperadaNaContagem: contagem1?.quantidadeEsperada ?? null,
@@ -245,6 +250,7 @@ export async function getItensAgrupados(filtro?: FiltroItensAgrupados): Promise<
   return itens.filter((item) => {
     if (filtro?.status && item.status !== filtro.status) return false;
     if (filtro?.atribuidoPara && item.atribuidoPara !== filtro.atribuidoPara) return false;
+    if (filtro?.tarefaId && item.tarefaId !== filtro.tarefaId) return false;
     return true;
   });
 }
@@ -270,14 +276,18 @@ export async function atribuirItem(chave: string, usuarioId: string | null): Pro
   return getItemAgrupado(chave);
 }
 
-export async function atribuirItensEmMassa(chaves: string[], usuarioId: string | null): Promise<void> {
+export async function atribuirItensEmMassa(
+  chaves: string[],
+  usuarioId: string | null,
+  tarefaId?: string
+): Promise<void> {
   await Promise.all(
     chaves.map((chave) => {
       const [empresaCodigo, codigoProduto, localCodigo] = chave.split('|');
       return prisma.itemAtribuicao.upsert({
         where: { chave },
-        create: { chave, empresaCodigo, codigoProduto, localCodigo, usuarioId },
-        update: { usuarioId },
+        create: { chave, empresaCodigo, codigoProduto, localCodigo, usuarioId, tarefaId },
+        update: { usuarioId, ...(tarefaId ? { tarefaId } : {}) },
       });
     })
   );
@@ -293,6 +303,11 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
   const solicitacao = await prisma.itemSolicitacaoSegundaContagem.findUnique({
     where: { chave: input.chave },
   });
+  // A conferência nasce dentro da mesma tarefa em que o item foi distribuído.
+  const atribuicaoDoItem = await prisma.itemAtribuicao.findUnique({
+    where: { chave: input.chave },
+    select: { tarefaId: true },
+  });
   const contagemExistente1 = await prisma.itemConferenciaResultado.findUnique({
     where: { chave_numeroContagem: { chave: input.chave, numeroContagem: 1 } },
   });
@@ -301,9 +316,9 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
   const numeroContagem = contagemExistente1 && contagemExistente1.diferenca !== 0 && solicitacao ? 2 : 1;
 
   const diferenca = input.quantidadeConferida - grupo.quantidadeEsperada;
-  if (diferenca !== 0 && !input.motivo) {
-    throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
-  }
+  // Sem cobrar motivo de quem confere: exigi-lo fazia o app avisar que a
+  // conferência tinha divergido, e a contagem tem que ser cega. O gestor
+  // classifica depois, no painel.
 
   let fotoChaveArmazenamento: string | undefined;
   if (input.foto) {
@@ -335,6 +350,7 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
       codigoLocalBipado: input.codigoLocalBipado,
       codigoProdutoBipado: input.codigoProdutoBipado,
       fotoChaveArmazenamento,
+      tarefaId: atribuicaoDoItem?.tarefaId ?? null,
     },
     update: {
       quantidadeConferida: input.quantidadeConferida,

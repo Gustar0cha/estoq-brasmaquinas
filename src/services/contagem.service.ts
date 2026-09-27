@@ -1138,14 +1138,15 @@ export async function enviarContagemItem(input: EnviarContagemItemInput): Promis
     item.quantidadeTotal !== null && input.quantidadeConferida === item.quantidadeTotal;
   const diferenca =
     bateuDisponivel || bateuTotal ? 0 : input.quantidadeConferida - item.quantidadeEsperada;
-  // Item fora do lugar quase sempre diverge (o sistema esperava 0 ali), e o
-  // motivo já é conhecido — não faz sentido cobrar do colaborador.
+  // O motivo NÃO é mais cobrado de quem conta.
+  //
+  // Cobrá-lo obrigava o app a dizer "essa contagem não bateu com o sistema" —
+  // ou seja, entregava o esperado a quem deveria contar às cegas, e ainda
+  // permitia ir tentando número até a mensagem sumir. Quem classifica o
+  // motivo é o gestor, no painel, olhando a divergência.
   const motivo = item.divergenciaLocal
     ? (input.motivo ?? 'Item encontrado em local diferente do sistema')
     : input.motivo;
-  if (diferenca !== 0 && !motivo) {
-    throw new Error('Motivo é obrigatório quando a contagem diverge do esperado.');
-  }
 
   let fotoChave: string | undefined;
   if (input.foto) {
