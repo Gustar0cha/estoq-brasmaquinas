@@ -25,6 +25,10 @@ model Usuario {
   // Loja do usuário (ver src/lib/filiais.ts). Só enxerga locais cujo CODLOCAL
   // começa com o prefixo da própria filial; null = vê todas as lojas.
   filial    String?
+  // Desativar em vez de apagar: quem já contou alguma coisa não pode sumir
+  // sem levar o histórico junto. Inativo não entra no sistema nem aparece
+  // para receber tarefa.
+  ativo     Boolean      @default(true)
   criadoEm  DateTime     @default(now())
 
   atribuicoes   MovimentacaoAtribuicao[]

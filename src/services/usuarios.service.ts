@@ -18,9 +18,11 @@ export async function getUsuarios() {
   return usuarios.map(semSenha);
 }
 
+// Só quem está ativo recebe tarefa: login desativado não pode aparecer na
+// lista de quem vai contar.
 export async function getOperadores() {
   const usuarios = await prisma.usuario.findMany({
-    where: { role: 'OPERADOR' },
+    where: { role: 'OPERADOR', ativo: true },
     orderBy: { nome: 'asc' },
   });
   return usuarios.map(semSenha);
@@ -61,16 +63,29 @@ export interface AtualizarUsuarioInput {
   role?: PapelUsuario;
   // null limpa a filial (volta a enxergar todas as lojas); undefined mantém.
   filial?: string | null;
+  // Nome passou a ser editável: login criado com nome errado era corrigido
+  // apagando e recriando, o que levava o histórico junto.
+  nome?: string;
+  ativo?: boolean;
 }
 
-// O nome não é editável de propósito — só login, senha e papel.
 export async function atualizarUsuario(id: string, input: AtualizarUsuarioInput) {
   const usuarioExistente = await prisma.usuario.findUnique({ where: { id } });
   if (!usuarioExistente) {
     throw new Error('Usuário não encontrado.');
   }
 
-  const dados: { login?: string; senhaHash?: string; role?: PapelUsuario; filial?: string | null } = {};
+  const dados: {
+    login?: string;
+    senhaHash?: string;
+    role?: PapelUsuario;
+    filial?: string | null;
+    nome?: string;
+    ativo?: boolean;
+  } = {};
+
+  if (input.nome !== undefined && input.nome.trim()) dados.nome = input.nome.trim();
+  if (input.ativo !== undefined) dados.ativo = input.ativo;
 
   if (input.filial !== undefined) {
     dados.filial = ehFilial(input.filial) ? input.filial : null;
@@ -94,4 +109,34 @@ export async function atualizarUsuario(id: string, input: AtualizarUsuarioInput)
 
   const usuario = await prisma.usuario.update({ where: { id }, data: dados });
   return semSenha(usuario);
+}
+
+// Quantos registros dependem deste usuário. É o que decide entre apagar de
+// verdade e desativar: quem já contou alguma coisa não pode sumir sem levar o
+// histórico junto.
+export async function vinculosDoUsuario(id: string): Promise<number> {
+  const [contagens, conferencias, atribuicoes, tarefas, responsavel] = await Promise.all([
+    prisma.contagemItem.count({
+      where: { OR: [{ atribuidoParaId: id }, { conferidoPorId: id }, { iniciadoPorId: id }] },
+    }),
+    prisma.itemConferenciaResultado.count({ where: { conferidoPorId: id } }),
+    prisma.itemAtribuicao.count({ where: { usuarioId: id } }),
+    prisma.tarefa.count({ where: { criadaPorId: id } }),
+    prisma.tarefaResponsavel.count({ where: { usuarioId: id } }),
+  ]);
+  return contagens + conferencias + atribuicoes + tarefas + responsavel;
+}
+
+export async function apagarUsuario(id: string): Promise<{ apagado: boolean; vinculos: number }> {
+  const vinculos = await vinculosDoUsuario(id);
+  if (vinculos > 0) {
+    // Não apaga: desativa. O login para de entrar e some das atribuições,
+    // mas tudo que a pessoa contou continua no relatório com o nome dela.
+    await prisma.usuario.update({ where: { id }, data: { ativo: false } });
+    return { apagado: false, vinculos };
+  }
+  await prisma.notificacaoPreferencia.deleteMany({ where: { usuarioId: id } });
+  await prisma.notificacao.deleteMany({ where: { usuarioId: id } });
+  await prisma.usuario.delete({ where: { id } });
+  return { apagado: true, vinculos: 0 };
 }

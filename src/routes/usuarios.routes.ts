@@ -44,10 +44,12 @@ usuariosRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
 });
 
 const atualizarUsuarioSchema = z.object({
+  nome: z.string().trim().min(1).optional(),
   login: z.string().min(1).optional(),
   senha: z.string().min(4).optional(),
   role: z.enum(['ADMIN', 'OPERADOR']).optional(),
   filial: z.string().nullable().optional(),
+  ativo: z.boolean().optional(),
 });
 
 usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
@@ -65,5 +67,22 @@ usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
     res
       .status(409)
       .json({ erro: error instanceof Error ? error.message : 'Não foi possível atualizar o usuário.' });
+  }
+});
+
+// Excluir login. Quem já tem histórico não é apagado: é DESATIVADO, senão o
+// relatório perderia o nome de quem contou.
+usuariosRouter.delete('/:id', autenticar, exigirAdmin, async (req, res) => {
+  const { id } = req.params as { id: string };
+  if (id === req.usuario!.sub) {
+    res.status(400).json({ erro: 'Você não pode excluir o seu próprio login.' });
+    return;
+  }
+  try {
+    res.json(await usuariosService.apagarUsuario(id));
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível excluir.' });
   }
 });
