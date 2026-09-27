@@ -58,6 +58,9 @@ interface LinhaMovimentacaoSankhya {
   codigoProduto: number;
   descricao: string;
   unidade: string | null;
+  marca: string | null;
+  grupoCodigo: number | null;
+  grupo: string | null;
   localCodigo: number;
   local: string | null;
   quantidadeEsperada: number;
@@ -94,6 +97,9 @@ function montarSelectBase(): string {
       ITE.CODPROD          AS "codigoProduto",
       PRO.DESCRPROD        AS "descricao",
       PRO.CODVOL           AS "unidade",
+      PRO.MARCA            AS "marca",
+      PRO.CODGRUPOPROD     AS "grupoCodigo",
+      GRU.DESCRGRUPOPROD   AS "grupo",
       ITE.CODLOCALORIG     AS "localCodigo",
       COALESCE(LOC.DESCRLOCAL, TO_CHAR(ITE.CODLOCALORIG)) AS "local",
       MAX((
@@ -106,6 +112,7 @@ function montarSelectBase(): string {
     FROM TGFCAB CAB
     INNER JOIN TGFITE ITE ON CAB.NUNOTA = ITE.NUNOTA
     INNER JOIN TGFPRO PRO ON ITE.CODPROD = PRO.CODPROD
+    LEFT JOIN TGFGRU GRU ON PRO.CODGRUPOPROD = GRU.CODGRUPOPROD
     INNER JOIN TGFTOP TOP ON CAB.CODTIPOPER = TOP.CODTIPOPER AND CAB.DHTIPOPER = TOP.DHALTER
     LEFT JOIN TGFPAR PAR ON CAB.CODPARC = PAR.CODPARC
     LEFT JOIN TGFLOC LOC ON ITE.CODLOCALORIG = LOC.CODLOCAL
@@ -117,7 +124,8 @@ const GROUP_BY = `
   GROUP BY
     CAB.NUNOTA, CAB.CODTIPOPER, TOP.ATUALEST, PAR.NOMEPARC, CAB.DTNEG,
     CAB.CODEMP, EMP.NOMEFANTASIA,
-    ITE.CODPROD, PRO.DESCRPROD, PRO.CODVOL, ITE.CODLOCALORIG, LOC.DESCRLOCAL
+    ITE.CODPROD, PRO.DESCRPROD, PRO.CODVOL, PRO.MARCA, PRO.CODGRUPOPROD,
+    GRU.DESCRGRUPOPROD, ITE.CODLOCALORIG, LOC.DESCRLOCAL
 `;
 
 // Códigos de local (ITE.CODLOCALORIG) que começam com "RUA" mas não devem
@@ -172,6 +180,12 @@ function agruparPorNota(linhas: LinhaMovimentacaoSankhya[]): MovimentacaoSankhya
       codigoBarras: '',
       descricao: linha.descricao,
       unidade: linha.unidade ?? '',
+      marca: linha.marca ?? null,
+      grupoCodigo:
+        linha.grupoCodigo === null || linha.grupoCodigo === undefined
+          ? null
+          : String(linha.grupoCodigo),
+      grupo: linha.grupo ?? null,
       local: linha.local ?? '',
       quantidadeEsperada: linha.quantidadeEsperada,
     };

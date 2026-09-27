@@ -22,6 +22,8 @@ import { executarQuery } from './gateway';
 import { FILTRO_SQL_SEM_QUARENTENA } from './client';
 
 const PAGINA = 5000;
+// Teto do Oracle para uma lista IN (ORA-01795).
+const LOCAIS_POR_CONSULTA = 900;
 
 // Agrega TGFEST por produto+local+empresa e descarta o que não tem saldo.
 // Serve de base pra todas as consultas deste módulo.
@@ -196,25 +198,33 @@ export async function getItensComSaldoPorLocais(
 
   return comCache(chave, VALIDADE_SALDO_MS, async () => {
     const linhas: LinhaItemComSaldo[] = [];
-    let offset = 0;
 
-    while (true) {
-      const sql = `
-        SELECT ${CAMPOS_ITEM}
-        FROM (${SUBCONSULTA_SALDO}) S
-        ${JUNCOES_ITEM}
-        WHERE S.CODLOCAL IN (${locais.join(', ')})
-          AND S.CODEMP = ${empresaNum}
-          AND ${FILTRO_SQL_SEM_QUARENTENA}
-        GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
-        ORDER BY S.CODLOCAL, S.CODPROD
-        OFFSET ${offset} ROWS FETCH NEXT ${PAGINA} ROWS ONLY
-      `;
+    // O Oracle não aceita mais de 1000 expressões num IN (ORA-01795), e a
+    // loja de Guanambi sozinha tem quase 2 mil locais. Sem fatiar, procurar
+    // item na loja inteira — ou atribuir uma área grande — estourava a
+    // consulta.
+    for (let inicio = 0; inicio < locais.length; inicio += LOCAIS_POR_CONSULTA) {
+      const lote = locais.slice(inicio, inicio + LOCAIS_POR_CONSULTA);
+      let offset = 0;
 
-      const pagina = await executarQuery<LinhaItemComSaldo>(sql);
-      linhas.push(...pagina);
-      if (pagina.length < PAGINA) break;
-      offset += PAGINA;
+      while (true) {
+        const sql = `
+          SELECT ${CAMPOS_ITEM}
+          FROM (${SUBCONSULTA_SALDO}) S
+          ${JUNCOES_ITEM}
+          WHERE S.CODLOCAL IN (${lote.join(', ')})
+            AND S.CODEMP = ${empresaNum}
+            AND ${FILTRO_SQL_SEM_QUARENTENA}
+          GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
+          ORDER BY S.CODLOCAL, S.CODPROD
+          OFFSET ${offset} ROWS FETCH NEXT ${PAGINA} ROWS ONLY
+        `;
+
+        const pagina = await executarQuery<LinhaItemComSaldo>(sql);
+        linhas.push(...pagina);
+        if (pagina.length < PAGINA) break;
+        offset += PAGINA;
+      }
     }
 
     return linhas.map(montarItem);

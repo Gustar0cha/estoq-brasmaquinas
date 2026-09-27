@@ -29,6 +29,11 @@ export interface ItemAgrupadoDTO {
   rua: string | null;
   predio: string | null;
   nivel: string | null;
+  // Marca e grupo do Sankhya: a Mov. Diária ganhou os mesmos filtros das
+  // Atribuições, e é por eles que o gestor recorta o lote.
+  marca: string | null;
+  grupoCodigo: string | null;
+  grupo: string | null;
   // O saldo do local AGORA (TGFEST, lido a cada consulta). Muda sozinho
   // quando entra nota ou alguém ajusta o produto no Sankhya.
   quantidadeEsperada: number;
@@ -111,6 +116,9 @@ interface GrupoAcumulado {
   rua: string | null;
   predio: string | null;
   nivel: string | null;
+  marca: string | null;
+  grupoCodigo: string | null;
+  grupo: string | null;
   quantidadeEsperada: number;
   notasOrigem: NotaOrigemDTO[];
 }
@@ -139,6 +147,9 @@ async function agruparPorProdutoLocal(filtro?: { tipo?: TipoMovimentacaoSankhya 
           local: item.local,
           localCodigo,
           ...parsearLocalizacao(item.local),
+          marca: item.marca,
+          grupoCodigo: item.grupoCodigo,
+          grupo: item.grupo,
           quantidadeEsperada: item.quantidadeEsperada,
           notasOrigem: [],
         };
@@ -209,6 +220,9 @@ async function montarDTOs(grupos: Map<string, GrupoAcumulado>): Promise<ItemAgru
       rua: grupo.rua,
       predio: grupo.predio,
       nivel: grupo.nivel,
+      marca: grupo.marca,
+      grupoCodigo: grupo.grupoCodigo,
+      grupo: grupo.grupo,
       quantidadeEsperada: grupo.quantidadeEsperada,
       notasOrigem: grupo.notasOrigem,
       status,

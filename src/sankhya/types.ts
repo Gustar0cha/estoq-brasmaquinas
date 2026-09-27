@@ -6,6 +6,11 @@ export interface ItemMovimentacaoSankhya {
   codigoBarras: string;
   descricao: string;
   unidade: string;
+  // Marca e grupo do Sankhya: é por eles que a Mov. Diária passou a poder ser
+  // filtrada, do mesmo jeito que as Atribuições.
+  marca: string | null;
+  grupoCodigo: string | null;
+  grupo: string | null;
   local: string;
   quantidadeEsperada: number;
 }

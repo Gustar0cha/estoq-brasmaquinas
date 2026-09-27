@@ -46,6 +46,38 @@ contagemRouter.get('/progresso-predios', autenticar, exigirAdmin, async (req, re
   res.json(await contagemService.getProgressoContagemPorPredio(filial, cicloDaQuery(req.query)));
 });
 
+// Procurar item para atribuir sem escolher prédio antes: por marca, grupo,
+// faixa de valor ou texto, em toda a loja.
+contagemRouter.get('/buscar-itens', autenticar, exigirAdmin, async (req, res) => {
+  const { empresa, marcas, grupos, custoMinimo, custoMaximo, busca, limite } = req.query;
+  const lista = (valor: unknown): string[] | undefined =>
+    typeof valor === 'string' && valor ? valor.split(',').filter(Boolean) : undefined;
+  const numero = (valor: unknown): number | undefined => {
+    if (typeof valor !== 'string' || !valor.trim()) return undefined;
+    const n = Number(valor);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  try {
+    res.json(
+      await contagemService.buscarItensParaAtribuir({
+        empresaCodigo: typeof empresa === 'string' && empresa ? empresa : undefined,
+        filial: await filialDoRequisitante(req.usuario?.sub),
+        marcas: lista(marcas),
+        grupos: lista(grupos),
+        custoMinimo: numero(custoMinimo),
+        custoMaximo: numero(custoMaximo),
+        busca: typeof busca === 'string' ? busca : undefined,
+        limite: numero(limite),
+      })
+    );
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível buscar os itens.' });
+  }
+});
+
 contagemRouter.get('/tarefas', autenticar, exigirAdmin, async (req, res) => {
   res.json(await contagemService.getTarefasDaContagem(cicloDaQuery(req.query)));
 });

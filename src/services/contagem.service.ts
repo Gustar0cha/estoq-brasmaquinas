@@ -1445,6 +1445,12 @@ export interface ItemDisponivelDTO {
   marca: string | null;
   grupoCodigo: string | null;
   grupo: string | null;
+  // Onde o item está. Preenchidos na busca por filtro, em que a lista mistura
+  // prédios; na listagem de um prédio só, vêm nulos porque já se sabe qual é.
+  rua?: string | null;
+  predio?: string | null;
+  empresaCodigo?: string;
+  empresaNome?: string;
   quantidadeTotal: number;
   quantidadeReservada: number;
   quantidadeDisponivel: number;
@@ -1532,6 +1538,154 @@ export async function getItensDisponiveis(filtro: {
     .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 
   return { itens, marcas, grupos };
+}
+
+export interface BuscaItensInput {
+  empresaCodigo?: string;
+  filial?: string | null;
+  marcas?: string[];
+  grupos?: string[];
+  custoMinimo?: number;
+  custoMaximo?: number;
+  busca?: string;
+  // Teto do que volta pra tela. O estoque inteiro passa de 10 mil itens, e
+  // jogar isso numa tabela é o que trava o navegador de quem está
+  // apresentando. O total real vem em `totalEncontrado`.
+  limite?: number;
+}
+
+export interface BuscaItensResultado {
+  itens: ItemDisponivelDTO[];
+  marcas: string[];
+  grupos: { codigo: string; nome: string }[];
+  totalEncontrado: number;
+  limitado: boolean;
+}
+
+const LIMITE_PADRAO_BUSCA = 400;
+
+// Procurar item para atribuir SEM ter que escolher um prédio antes.
+//
+// A tela de Atribuições só deixava filtrar marca/grupo/valor depois de abrir
+// um prédio, mas quem distribui quer o contrário: achar "tudo da marca X
+// acima de R$ 500" onde quer que esteja, e só então mandar para alguém.
+export async function buscarItensParaAtribuir(
+  input: BuscaItensInput
+): Promise<BuscaItensResultado> {
+  const predios = await getPrediosDisponiveis(input.empresaCodigo, input.filial ?? undefined);
+  if (predios.length === 0) {
+    return { itens: [], marcas: [], grupos: [], totalEncontrado: 0, limitado: false };
+  }
+
+  const nivelPorLocal = new Map<string, string | null>();
+  const predioPorLocal = new Map<string, { rua: string | null; predio: string | null }>();
+  const locaisPorEmpresa = new Map<string, string[]>();
+  for (const p of predios) {
+    for (const l of p.locais) {
+      nivelPorLocal.set(l.localCodigo, l.nivel);
+      predioPorLocal.set(l.localCodigo, { rua: p.rua, predio: p.predio });
+      const lista = locaisPorEmpresa.get(p.empresaCodigo) ?? [];
+      lista.push(l.localCodigo);
+      locaisPorEmpresa.set(p.empresaCodigo, lista);
+    }
+  }
+
+  let comSaldo: Awaited<ReturnType<typeof getItensComSaldoPorLocais>> = [];
+  for (const [empresa, locais] of locaisPorEmpresa) {
+    comSaldo = comSaldo.concat(await getItensComSaldoPorLocais(locais, empresa));
+  }
+
+  // As listas de marca e grupo saem do universo TODO, não do recorte: senão,
+  // escolher uma marca faria as outras sumirem do filtro.
+  const marcas = [...new Set(comSaldo.map((i) => i.marca).filter((m): m is string => !!m))].sort(
+    (a, b) => a.localeCompare(b, 'pt-BR')
+  );
+  const gruposMapa = new Map<string, string>();
+  for (const i of comSaldo) {
+    if (i.grupoCodigo) gruposMapa.set(i.grupoCodigo, i.grupo ?? i.grupoCodigo);
+  }
+  const grupos = [...gruposMapa.entries()]
+    .map(([codigo, nome]) => ({ codigo, nome }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+
+  let filtrados = filtrarPorMarcaEGrupo(comSaldo, input.marcas, input.grupos);
+
+  const termo = input.busca?.trim().toLowerCase();
+  if (termo) {
+    filtrados = filtrados.filter((i) =>
+      [i.descricao, i.codigoProduto, i.local, i.marca ?? '', i.grupo ?? '']
+        .join(' ')
+        .toLowerCase()
+        .includes(termo)
+    );
+  }
+
+  const precisaCusto =
+    input.custoMinimo !== undefined || input.custoMaximo !== undefined || filtrados.length <= 1500;
+  const custos = precisaCusto
+    ? await getCustosSemIcms(
+        filtrados.map((i) => ({ codigoProduto: i.codigoProduto, empresaCodigo: i.empresaCodigo }))
+      )
+    : new Map<string, number>();
+
+  if (input.custoMinimo !== undefined || input.custoMaximo !== undefined) {
+    filtrados = filtrados.filter((i) => {
+      const unitario = custos.get(chaveCusto(i.codigoProduto, i.empresaCodigo)) ?? 0;
+      // Sem custo cadastrado o item fica fora do recorte por valor: custo zero
+      // não é "barato". Foi o item sem custo que sujou o mapa na reunião.
+      if (unitario === 0) return false;
+      const total = unitario * i.quantidadeDisponivel;
+      if (input.custoMinimo !== undefined && total < input.custoMinimo) return false;
+      if (input.custoMaximo !== undefined && total > input.custoMaximo) return false;
+      return true;
+    });
+  }
+
+  const empresasDoRecorte = [...new Set(filtrados.map((i) => i.empresaCodigo))];
+  const abertos = await prisma.contagemItem.findMany({
+    where: { empresaCodigo: { in: empresasDoRecorte }, status: { in: STATUS_ABERTOS } },
+    select: { codigoProduto: true, localCodigo: true },
+  });
+  const chavesAbertas = new Set(abertos.map((a) => `${a.codigoProduto}|${a.localCodigo}`));
+
+  const totalEncontrado = filtrados.length;
+  const limite = input.limite ?? LIMITE_PADRAO_BUSCA;
+
+  // Mais caro primeiro: é o que o gestor quer contar antes, e foi o pedido de
+  // ordenar do maior para o menor pra não ter que rolar a lista inteira.
+  const ordenados = [...filtrados].sort((a, b) => {
+    const ca = (custos.get(chaveCusto(a.codigoProduto, a.empresaCodigo)) ?? 0) * a.quantidadeDisponivel;
+    const cb = (custos.get(chaveCusto(b.codigoProduto, b.empresaCodigo)) ?? 0) * b.quantidadeDisponivel;
+    return cb - ca || a.descricao.localeCompare(b.descricao, 'pt-BR');
+  });
+
+  const itens: ItemDisponivelDTO[] = ordenados.slice(0, limite).map((i) => {
+    const custoUnitario = custos.get(chaveCusto(i.codigoProduto, i.empresaCodigo)) ?? 0;
+    const doPredio = predioPorLocal.get(i.localCodigo);
+    return {
+      codigoProduto: i.codigoProduto,
+      descricao: i.descricao,
+      unidade: i.unidade,
+      localCodigo: i.localCodigo,
+      local: i.local,
+      nivel: nivelPorLocal.get(i.localCodigo) ?? null,
+      marca: i.marca,
+      grupoCodigo: i.grupoCodigo,
+      grupo: i.grupo,
+      rua: doPredio?.rua ?? null,
+      predio: doPredio?.predio ?? null,
+      empresaCodigo: i.empresaCodigo,
+      empresaNome: i.empresaNome,
+      quantidadeTotal: i.quantidadeTotal,
+      quantidadeReservada: i.quantidadeReservada,
+      quantidadeDisponivel: i.quantidadeDisponivel,
+      custoUnitario,
+      custoTotal: Math.round(custoUnitario * i.quantidadeDisponivel * 100) / 100,
+      emContagem: chavesAbertas.has(`${i.codigoProduto}|${i.localCodigo}`),
+    };
+  });
+
+  return { itens, marcas, grupos, totalEncontrado, limitado: totalEncontrado > limite };
 }
 
 export interface AtribuirContagemItensInput {
