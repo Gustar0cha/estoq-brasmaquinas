@@ -177,8 +177,13 @@ contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
   const { status, atribuidoPara, dataInicio, dataFim, semContagemFechada } = req.query;
 
+  const { tarefaIds } = req.query;
   const itens = await contagemService.getContagemItens({
     semContagemFechada: semContagemFechada === 'true',
+    tarefaIds:
+      typeof tarefaIds === 'string' && tarefaIds
+        ? tarefaIds.split(',').filter(Boolean)
+        : undefined,
     status: typeof status === 'string' ? (status as StatusContagemItem) : undefined,
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
     dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,

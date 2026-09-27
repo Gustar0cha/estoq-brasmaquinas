@@ -138,6 +138,9 @@ export interface FiltroContagemItens {
   dataFim?: Date;
   // Inventário. Ausente = todos.
   cicloId?: string;
+  // Recorte por tarefa — é o que separa o inventário da movimentação diária
+  // e um lote de trabalho do outro. Várias tarefas somam.
+  tarefaIds?: string[];
   // Esconde o que pertence a inventário já fechado. É o que a tela do
   // operador usa: contagem encerrada não é mais trabalho de ninguém, e ficava
   // ocupando a lista dele junto com a tarefa de hoje.
@@ -314,6 +317,41 @@ export async function getPrediosDisponiveis(
 // Atribuição (admin distribui um prédio inteiro pra um colaborador contar)
 // ---------------------------------------------------------------------------
 
+// Atribuir é criar (ou continuar) uma TAREFA. Repetir o mesmo nome numa
+// contagem aberta não cria outra: os itens novos entram na tarefa que já
+// existe, com o saldo do dia da adição — foi o que a operação combinou, pra
+// não picar o mesmo trabalho em vários lotes.
+async function acharOuCriarTarefa(
+  nome: string,
+  cicloId: string,
+  criadaPorId: string,
+  responsaveisIds: string[]
+): Promise<string> {
+  const existente = await prisma.tarefa.findFirst({
+    where: { nome, tipo: 'CONTAGEM', cicloId, status: 'ABERTA' },
+  });
+
+  const tarefaId =
+    existente?.id ??
+    (
+      await prisma.tarefa.create({
+        data: { nome, tipo: 'CONTAGEM', cicloId, criadaPorId },
+      })
+    ).id;
+
+  for (const usuarioId of [...new Set(responsaveisIds)]) {
+    await prisma.tarefaResponsavel
+      .upsert({
+        where: { tarefaId_usuarioId: { tarefaId, usuarioId } },
+        create: { tarefaId, usuarioId },
+        update: {},
+      })
+      .catch(() => undefined);
+  }
+
+  return tarefaId;
+}
+
 export interface AtribuirContagemPredioInput {
   rua: string | null;
   predio: string | null;
@@ -423,10 +461,21 @@ export async function atribuirContagemPredio(
   }
 
   const ciclo = await garantirCicloAberto(input.atribuidoPorId);
+  const rotuloTarefa =
+    input.tarefaNome?.trim() ||
+    rotuloDoGrupo(input.rua, input.predio) +
+      (input.nivel !== undefined ? ` · ${rotuloDaSubdivisao(input.nivel)}` : '');
+  const tarefaId = await acharOuCriarTarefa(
+    rotuloTarefa,
+    ciclo.id,
+    input.atribuidoPorId,
+    responsaveis
+  );
 
   await prisma.contagemItem.createMany({
     data: novos.map((i, indice) => ({
       cicloId: ciclo.id,
+      tarefaId,
       empresaCodigo: i.empresaCodigo,
       empresaNome: i.empresaNome,
         codigoProduto: i.codigoProduto,
@@ -448,7 +497,7 @@ export async function atribuirContagemPredio(
       // uma pessoa herdar só o fundo do prédio.
       atribuidoParaId: responsaveis[indice % responsaveis.length],
       atribuidoPorId: input.atribuidoPorId,
-      tarefaNome: input.tarefaNome?.trim() || null,
+      tarefaNome: rotuloTarefa,
     })),
   });
 
@@ -850,10 +899,17 @@ export async function registrarItemForaDoLugar(
   );
 
   const cicloDoItem = await garantirCicloAberto(input.usuarioId);
+  const tarefaDoAchado = await acharOuCriarTarefa(
+    `Itens fora do lugar · ${new Date().toLocaleDateString('pt-BR')}`,
+    cicloDoItem.id,
+    input.usuarioId,
+    [input.usuarioId]
+  );
 
   const criado = await prisma.contagemItem.create({
     data: {
       cicloId: cicloDoItem.id,
+      tarefaId: tarefaDoAchado,
       empresaCodigo: base.empresaCodigo,
       empresaNome: base.empresaNome,
       codigoProduto: base.codigoProduto,
@@ -1010,6 +1066,9 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
     where: {
       ...(filtro?.status ? { status: filtro.status } : {}),
       ...(filtro?.cicloId ? { cicloId: filtro.cicloId } : {}),
+      ...(filtro?.tarefaIds && filtro.tarefaIds.length > 0
+        ? { tarefaId: { in: filtro.tarefaIds } }
+        : {}),
       // Item sem ciclo é de antes do conceito existir; continua aparecendo,
       // porque não há inventário fechado pra ele.
       ...(filtro?.semContagemFechada
@@ -1514,6 +1573,10 @@ export async function atribuirContagemItens(
   }
 
   const ciclo = await garantirCicloAberto(input.atribuidoPorId);
+  const rotuloTarefa = input.tarefaNome?.trim() || `Itens avulsos · ${new Date().toLocaleDateString('pt-BR')}`;
+  const tarefaId = await acharOuCriarTarefa(rotuloTarefa, ciclo.id, input.atribuidoPorId, [
+    input.atribuidoParaId,
+  ]);
 
   await prisma.contagemItem.createMany({
     data: novos.map((i) => {
@@ -1524,6 +1587,7 @@ export async function atribuirContagemItens(
       );
       return {
         cicloId: ciclo.id,
+        tarefaId,
         empresaCodigo: i.empresaCodigo,
         empresaNome: i.empresaNome,
           codigoProduto: i.codigoProduto,
@@ -1541,7 +1605,7 @@ export async function atribuirContagemItens(
         nivel,
         atribuidoParaId: input.atribuidoParaId,
         atribuidoPorId: input.atribuidoPorId,
-        tarefaNome: input.tarefaNome?.trim() || null,
+        tarefaNome: rotuloTarefa,
       };
     }),
   });
@@ -1651,11 +1715,14 @@ export async function registrarContagemAvulsa(
   const localCodigo = `${prefixo ?? ''}AVULSA`;
 
   const ciclo = await garantirCicloAberto(input.usuarioId);
+  const rotuloTarefa = input.tarefaNome?.trim() || `Avulsa · ${new Date().toLocaleDateString('pt-BR')}`;
+  const tarefaId = await acharOuCriarTarefa(rotuloTarefa, ciclo.id, input.usuarioId, [input.usuarioId]);
   const agora = new Date();
 
   const criado = await prisma.contagemItem.create({
     data: {
       cicloId: ciclo.id,
+      tarefaId,
       empresaCodigo: base.empresaCodigo,
       empresaNome: base.empresaNome,
       codigoProduto: base.codigoProduto,
@@ -1670,7 +1737,7 @@ export async function registrarContagemAvulsa(
       rua: null,
       predio: null,
       nivel: null,
-      tarefaNome: input.tarefaNome?.trim() || null,
+      tarefaNome: rotuloTarefa,
       status: diferenca === 0 ? 'CONFERIDA' : 'DIVERGENCIA',
       atribuidoParaId: input.usuarioId,
       atribuidoPorId: input.usuarioId,

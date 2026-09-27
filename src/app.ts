@@ -18,6 +18,7 @@ import { movimentacoesRouter } from './routes/movimentacoes.routes';
 import { negativadosRouter } from './routes/negativados.routes';
 import { notificacoesRouter } from './routes/notificacoes.routes';
 import { relatoriosRouter } from './routes/relatorios.routes';
+import { tarefaRouter } from './routes/tarefa.routes';
 import { usuariosRouter } from './routes/usuarios.routes';
 
 export const app = express();
@@ -64,6 +65,7 @@ app.use('/conferencia-diaria', conferenciaDiariaRouter);
 app.use('/historico-contagem', historicoRouter);
 app.use('/dashboard', dashboardRouter);
 app.use('/ciclos', cicloRouter);
+app.use('/tarefas', tarefaRouter);
 app.use('/contagem', contagemRouter);
 app.use('/contagem-itens', contagemItensRouter);
 app.use('/produtos-negativados', negativadosRouter);

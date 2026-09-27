@@ -34,6 +34,8 @@ model Usuario {
   segundasContagensSolicitadas ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesFeitas")
   segundasContagensAtribuidas  ItemSolicitacaoSegundaContagem[] @relation("SolicitacoesAtribuidas")
 
+  tarefasCriadas       Tarefa[]            @relation("TarefaCriadaPor")
+  tarefasResponsavel   TarefaResponsavel[]
   contagemItensIniciados      ContagemItem[] @relation("ContagemIniciadaPor")
   contagemItensConferidos1    ContagemItem[] @relation("ContagemConferidaPor1")
   contagemItensAtribuidos2    ContagemItem[] @relation("ContagemItensAtribuidos2")
@@ -119,6 +121,8 @@ model ItemAtribuicao {
   localCodigo   String
   usuario       Usuario? @relation(fields: [usuarioId], references: [id])
   usuarioId     String?
+  tarefa        Tarefa?  @relation(fields: [tarefaId], references: [id])
+  tarefaId      String?
   atualizadoEm  DateTime @updatedAt
 
   @@map("item_atribuicoes")
@@ -158,6 +162,11 @@ model ItemConferenciaResultado {
   // Mesma regra da contagem física: chave do objeto no MinIO, servida só
   // pelo proxy autenticado da API.
   fotoChaveArmazenamento String?
+  // A tarefa de movimentação diária em que essa conferência foi feita. Sem
+  // ela, um resultado gravado no dia 23 continuava colado no mesmo
+  // produto+local hoje, porque a chave não tem data.
+  tarefa   Tarefa? @relation(fields: [tarefaId], references: [id])
+  tarefaId String?
 
   @@unique([chave, numeroContagem])
   @@map("item_conferencia_resultados")
@@ -278,6 +287,58 @@ model CicloContagem {
   itens ContagemItem[]
 
   @@map("ciclos_contagem")
+  tarefas Tarefa[]
+}
+
+// A TAREFA é a unidade de trabalho e, principalmente, o recorte dos dados.
+//
+// Antes, contagem de inventário e conferência de nota caíam no mesmo balaio:
+// quem abria um relatório do dia 23 recebia o inventário daquele dia somado às
+// movimentações, e não havia como separar. Agora todo item nasce dentro de uma
+// tarefa, a tarefa tem TIPO, e relatórios/dashboards recortam por ela.
+model Tarefa {
+  id     String @id @default(uuid())
+  nome   String
+  // 'CONTAGEM' (inventário/contagem por local) ou 'MOV_DIARIA' (conferência
+  // do que entrou e saiu por nota). É o que impede os dois de se misturarem.
+  tipo   String
+  // 'ABERTA' | 'FECHADA'. A operação combinou fechar no mesmo dia em que abre:
+  // tarefa que atravessa o dia incorpora movimentação do dia seguinte.
+  status String @default("ABERTA")
+
+  // Só nas tarefas de contagem: a qual inventário ela pertence.
+  ciclo   CicloContagem? @relation(fields: [cicloId], references: [id])
+  cicloId String?
+
+  // Só nas de movimentação diária: de que dia são as notas conferidas.
+  diaReferencia DateTime?
+
+  criadaPor   Usuario  @relation("TarefaCriadaPor", fields: [criadaPorId], references: [id])
+  criadaPorId String
+  criadaEm    DateTime @default(now())
+  fechadaEm   DateTime?
+  observacao  String?
+
+  responsaveis    TarefaResponsavel[]
+  contagemItens   ContagemItem[]
+  itemAtribuicoes ItemAtribuicao[]
+  itemResultados  ItemConferenciaResultado[]
+
+  @@map("tarefas")
+}
+
+// Mais de uma pessoa na mesma tarefa. Os itens continuam tendo um dono cada
+// (repartidos em rodízio), mas a tarefa é do grupo.
+model TarefaResponsavel {
+  id        String   @id @default(uuid())
+  tarefa    Tarefa   @relation(fields: [tarefaId], references: [id], onDelete: Cascade)
+  tarefaId  String
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id])
+  usuarioId String
+  criadoEm  DateTime @default(now())
+
+  @@unique([tarefaId, usuarioId])
+  @@map("tarefa_responsaveis")
 }
 
 model ContagemItem {
@@ -343,6 +404,10 @@ model ContagemItem {
   atribuidoPor    Usuario? @relation("ContagemAtribuidaPor", fields: [atribuidoPorId], references: [id])
   atribuidoPorId  String?
   atribuidoEm     DateTime @default(now())
+  // A tarefa a que este item pertence. É por ela que relatório e dashboard
+  // recortam os dados.
+  tarefa   Tarefa? @relation(fields: [tarefaId], references: [id])
+  tarefaId String?
   // Nome que o admin deu à tarefa na hora de atribuir ("Rua 2 manhã",
   // "Recontagem do Aldir"). É só um rótulo pra encontrar o lote depois na
   // aba Contagens — sem ele o gestor só tem rua/prédio pra se orientar, e
