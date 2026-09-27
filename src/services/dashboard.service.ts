@@ -24,6 +24,9 @@ export interface FiltroDashboard {
   // recorta num inventário específico, que é como se olha uma contagem
   // passada sem depender de lembrar as datas dela.
   cicloId?: string;
+  // Recorte por tarefa: o dashboard passa a falar de um lote de trabalho
+  // específico, e não de tudo que foi contado no período.
+  tarefaIds?: string[];
 }
 
 export interface EmpresaDashboard {
@@ -190,12 +193,17 @@ function diaDe(data: Date): string {
 export async function getDashboardContagem(filtro: FiltroDashboard): Promise<DashboardContagem> {
   const daEmpresa = filtro.empresaCodigo ? { empresaCodigo: filtro.empresaCodigo } : {};
   const doCiclo = filtro.cicloId ? { cicloId: filtro.cicloId } : {};
+  const dasTarefas =
+    filtro.tarefaIds && filtro.tarefaIds.length > 0
+      ? { tarefaId: { in: filtro.tarefaIds } }
+      : {};
 
   const where =
     filtro.modo === 'HISTORICO'
       ? {
           ...daEmpresa,
           ...doCiclo,
+          ...dasTarefas,
           status: { in: STATUS_CONTADO },
           // No histórico a data que importa é a da contagem, não a da
           // atribuição: o recorte é "o que foi contado nesse período".
@@ -204,7 +212,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
             { dataConferencia2: { gte: filtro.dataInicio, lte: filtro.dataFim } },
           ],
         }
-      : { ...daEmpresa, ...doCiclo };
+      : { ...daEmpresa, ...doCiclo, ...dasTarefas };
 
   const itens = (await prisma.contagemItem.findMany({
     where,
@@ -474,7 +482,12 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
         )
       : 0;
 
-  acuracidade.topDivergenciaFinanceira = [...divergentesDetalhe]
+  // Produto sem custo cadastrado no Sankhya fica FORA do ranking de dinheiro:
+  // ele entra valendo R$ 0 e ocupa uma linha que deveria mostrar prejuízo de
+  // verdade. Foi o item que sujou a apresentação. Ele continua contado no
+  // ranking por quantidade e no total de `itensSemCusto`.
+  acuracidade.topDivergenciaFinanceira = divergentesDetalhe
+    .filter((d) => d.valor > 0)
     .sort((a, b) => b.valor - a.valor)
     .slice(0, 10)
     .map(({ descricao, local, valor }) => ({ descricao, local, valor }));

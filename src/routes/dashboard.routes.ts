@@ -12,6 +12,12 @@ const filtroSchema = z.object({
   dataFim: z.coerce.date().optional(),
   empresaCodigo: z.string().min(1).optional(),
   cicloId: z.string().min(1).optional(),
+  // Lista separada por vírgula — o dashboard passa a poder falar de um lote
+  // de trabalho específico em vez de tudo do período.
+  tarefaIds: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(',').filter(Boolean) : undefined)),
 });
 
 dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
