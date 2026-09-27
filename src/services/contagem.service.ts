@@ -84,6 +84,7 @@ export interface ContagemItemDTO {
   atribuidoPara: string | null;
   atribuidoPorId?: string;
   atribuidoEm: string;
+  tarefaId: string | null;
   tarefaNome: string | null;
   iniciadoPorId?: string;
   iniciadoEm?: string;
@@ -185,6 +186,7 @@ function montarContagemItemDTO(item: any): ContagemItemDTO {
     atribuidoPara,
     atribuidoPorId: item.atribuidoPorId ?? undefined,
     atribuidoEm: item.atribuidoEm.toISOString(),
+    tarefaId: item.tarefaId ?? null,
     tarefaNome: item.tarefaNome ?? null,
     iniciadoPorId: item.iniciadoPorId ?? undefined,
     iniciadoEm: item.iniciadoEm?.toISOString(),

@@ -44,7 +44,7 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
 });
 
 relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res) => {
-  const { dataInicio, dataFim, somenteDivergencias, incluirFotos, cicloId } = req.query;
+  const { tarefaIds, dataInicio, dataFim, somenteDivergencias, incluirFotos, cicloId } = req.query;
 
   try {
     const buffer = await gerarRelatorioContagemExcel({
@@ -53,6 +53,12 @@ relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res)
       somenteDivergencias: somenteDivergencias === 'true',
       incluirFotos: incluirFotos === 'true',
       cicloId: typeof cicloId === 'string' && cicloId ? cicloId : undefined,
+      // Recorte por tarefa: o gestor tira o relatório exatamente do lote que
+      // distribuiu, em vez de tudo que foi contado no mesmo período.
+      tarefaIds:
+        typeof tarefaIds === 'string' && tarefaIds
+          ? tarefaIds.split(',').filter(Boolean)
+          : undefined,
     });
     const nomeArquivo = somenteDivergencias === 'true' ? 'contagem-divergencias.xlsx' : 'contagem.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

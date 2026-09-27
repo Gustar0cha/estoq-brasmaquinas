@@ -153,6 +153,10 @@ export interface FiltroRelatorioContagem {
   somenteDivergencias?: boolean;
   // Inventário. Ausente = todos, que é o acumulado.
   cicloId?: string;
+  // Recorte por TAREFA — é o que o gestor pediu pra poder tirar o relatório
+  // exatamente do lote que ele distribuiu, sem levar junto tudo que foi
+  // contado no mesmo período. Várias tarefas somam.
+  tarefaIds?: string[];
   // Ver FiltroRelatorio.incluirFotos.
   incluirFotos?: boolean;
 }
@@ -164,7 +168,12 @@ export interface FiltroRelatorioContagem {
 export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContagem): Promise<ExcelJS.Buffer> {
   const somenteDivergencias = Boolean(filtro.somenteDivergencias);
   const comFotos = Boolean(filtro.incluirFotos);
-  const base = { dataInicio: filtro.dataInicio, dataFim: filtro.dataFim, cicloId: filtro.cicloId };
+  const base = {
+    dataInicio: filtro.dataInicio,
+    dataFim: filtro.dataFim,
+    cicloId: filtro.cicloId,
+    tarefaIds: filtro.tarefaIds,
+  };
 
   const itens = somenteDivergencias
     ? [
@@ -179,6 +188,11 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
   // verdade (atribuidoParaId), então dá pra dizer quem contou cada linha.
   const usuarios = await prisma.usuario.findMany({ select: { id: true, nome: true } });
   const nomePorId = new Map(usuarios.map((u) => [u.id, u.nome]));
+  // O nome sai da TAREFA, não do campo carimbado no item: os lotes que
+  // existiam antes da tarefa existir têm o campo vazio, mas já foram
+  // religados a uma tarefa na migração.
+  const tarefas = await prisma.tarefa.findMany({ select: { id: true, nome: true } });
+  const nomeDaTarefa = new Map(tarefas.map((t) => [t.id, t.nome]));
   const reservas = await getReservadosSankhya();
 
   const workbook = new ExcelJS.Workbook();
@@ -187,6 +201,7 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
   sheet.columns = [
     { header: 'SKU', key: 'sku', width: 14 },
     { header: 'Descrição', key: 'descricao', width: 40 },
+    { header: 'Tarefa', key: 'tarefa', width: 26 },
     { header: 'Local', key: 'local', width: 26 },
     { header: 'Rua', key: 'rua', width: 8 },
     { header: 'Prédio', key: 'predio', width: 8 },
@@ -220,6 +235,7 @@ export async function gerarRelatorioContagemExcel(filtro: FiltroRelatorioContage
     const linha = sheet.addRow({
       sku: item.codigoProduto,
       descricao: item.descricao,
+      tarefa: (item.tarefaId ? nomeDaTarefa.get(item.tarefaId) : null) ?? item.tarefaNome ?? '',
       local: item.local,
       rua: item.rua ?? '',
       predio: item.predio ?? '',
