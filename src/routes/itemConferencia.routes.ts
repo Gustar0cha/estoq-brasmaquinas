@@ -39,8 +39,12 @@ itemConferenciaRouter.get('/divergencias', autenticar, exigirAdmin, async (_req,
 
 itemConferenciaRouter.get('/:chave', autenticar, async (req, res) => {
   const { chave } = req.params as { chave: string };
+  const { tarefaId } = req.query;
 
-  const item = await itemConferenciaService.getItemAgrupado(chave);
+  const item = await itemConferenciaService.getItemAgrupado(
+    chave,
+    typeof tarefaId === 'string' && tarefaId ? tarefaId : undefined
+  );
   if (!item) {
     res.status(404).json({ erro: 'Item não encontrado.' });
     return;
@@ -56,6 +60,9 @@ const conferenciaItemSchema = z.object({
   observacao: z.string().optional(),
   codigoLocalBipado: z.string().optional(),
   codigoProdutoBipado: z.string().optional(),
+  // Em qual tarefa a pessoa está conferindo. É o que impede a conferência de
+  // hoje de sobrescrever a de ontem no mesmo produto+local.
+  tarefaId: z.string().optional(),
 });
 
 itemConferenciaRouter.post(
@@ -73,6 +80,7 @@ itemConferenciaRouter.post(
     try {
       const item = await itemConferenciaService.enviarConferenciaItem({
         chave,
+        tarefaId: parse.data.tarefaId,
         conferidoPorId: req.usuario!.sub,
         quantidadeConferida: parse.data.quantidadeConferida,
         motivo: parse.data.motivo,
@@ -92,6 +100,7 @@ itemConferenciaRouter.post(
 
 const solicitarSegundaContagemSchema = z.object({
   usuarioId: z.string().nullable(),
+  tarefaId: z.string().optional(),
 });
 
 itemConferenciaRouter.post(
@@ -109,7 +118,8 @@ itemConferenciaRouter.post(
     const item = await itemConferenciaService.solicitarSegundaContagem(
       chave,
       req.usuario!.sub,
-      parse.data.usuarioId
+      parse.data.usuarioId,
+      parse.data.tarefaId
     );
     if (!item) {
       res.status(404).json({ erro: 'Item não encontrado.' });
@@ -130,7 +140,12 @@ itemConferenciaRouter.get(
     const { chave, numeroContagem } = req.params as { chave: string; numeroContagem: string };
 
     try {
-      const stream = await itemConferenciaService.getFotoContagem(chave, Number(numeroContagem));
+      const { tarefaId } = req.query;
+      const stream = await itemConferenciaService.getFotoContagem(
+        chave,
+        Number(numeroContagem),
+        typeof tarefaId === 'string' && tarefaId ? tarefaId : undefined
+      );
       if (!stream) {
         res.status(404).json({ erro: 'Foto não encontrada.' });
         return;
@@ -158,7 +173,12 @@ itemConferenciaRouter.delete(
       return;
     }
 
-    const item = await itemConferenciaService.apagarContagemItem(chave, numero);
+    const { tarefaId } = req.query;
+    const item = await itemConferenciaService.apagarContagemItem(
+      chave,
+      numero,
+      typeof tarefaId === 'string' && tarefaId ? tarefaId : undefined
+    );
     if (!item) {
       res.status(404).json({ erro: 'Item não encontrado.' });
       return;
@@ -169,6 +189,7 @@ itemConferenciaRouter.delete(
 
 const atribuicaoSchema = z.object({
   usuarioId: z.string().nullable(),
+  tarefaId: z.string().optional(),
 });
 
 itemConferenciaRouter.patch('/atribuicao-em-massa', autenticar, exigirAdmin, async (req, res) => {
@@ -201,12 +222,17 @@ itemConferenciaRouter.patch('/:chave/atribuicao', autenticar, exigirAdmin, async
     return;
   }
 
-  const item = await itemConferenciaService.atribuirItem(chave, parse.data.usuarioId);
+  const item = await itemConferenciaService.atribuirItem(
+    chave,
+    parse.data.usuarioId,
+    parse.data.tarefaId
+  );
   res.json(item);
 });
 
 const comentarioSchema = z.object({
   comentarioAdmin: z.string(),
+  tarefaId: z.string().optional(),
 });
 
 itemConferenciaRouter.patch('/:chave/comentario', autenticar, exigirAdmin, async (req, res) => {
@@ -218,7 +244,11 @@ itemConferenciaRouter.patch('/:chave/comentario', autenticar, exigirAdmin, async
   }
 
   try {
-    const item = await itemConferenciaService.comentarDivergenciaItem(chave, parse.data.comentarioAdmin);
+    const item = await itemConferenciaService.comentarDivergenciaItem(
+      chave,
+      parse.data.comentarioAdmin,
+      parse.data.tarefaId
+    );
     res.json(item);
   } catch (error) {
     res.status(404).json({ erro: error instanceof Error ? error.message : 'Não encontrada.' });

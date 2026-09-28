@@ -13,6 +13,9 @@ export interface ItemMovimentacaoSankhya {
   grupo: string | null;
   local: string;
   quantidadeEsperada: number;
+  // Quanto ESTA nota movimentou do produto neste local. Diferente do saldo:
+  // é o que o gestor usa pra explicar a diferença depois da tarefa fechada.
+  quantidadeMovimentada: number;
 }
 
 export interface MovimentacaoSankhya {

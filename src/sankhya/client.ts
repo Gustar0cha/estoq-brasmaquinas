@@ -64,6 +64,7 @@ interface LinhaMovimentacaoSankhya {
   localCodigo: number;
   local: string | null;
   quantidadeEsperada: number;
+  quantidadeMovimentada: number;
 }
 
 function formatarDataOracle(data: Date): string {
@@ -108,7 +109,11 @@ function montarSelectBase(): string {
         WHERE EST.CODPROD = ITE.CODPROD
           AND EST.CODLOCAL = ITE.CODLOCALORIG
           AND EST.CODEMP = CAB.CODEMP
-      )) AS "quantidadeEsperada"
+      )) AS "quantidadeEsperada",
+      -- Quanto ESTA nota movimentou deste produto neste local. É outra coisa
+      -- que o saldo do local agora: é este número que o gestor usa para
+      -- explicar a diferença depois que a tarefa é encerrada.
+      NVL(SUM(ITE.QTDNEG), 0)  AS "quantidadeMovimentada"
     FROM TGFCAB CAB
     INNER JOIN TGFITE ITE ON CAB.NUNOTA = ITE.NUNOTA
     INNER JOIN TGFPRO PRO ON ITE.CODPROD = PRO.CODPROD
@@ -188,6 +193,7 @@ function agruparPorNota(linhas: LinhaMovimentacaoSankhya[]): MovimentacaoSankhya
       grupo: linha.grupo ?? null,
       local: linha.local ?? '',
       quantidadeEsperada: linha.quantidadeEsperada,
+      quantidadeMovimentada: linha.quantidadeMovimentada ?? 0,
     };
     movimentacao.itens.push(item);
   }
@@ -1046,6 +1052,51 @@ interface LinhaCustoSankhya {
 // O TGFCUS guarda histórico (uma linha por DTATUAL), então a leitura pega a
 // linha mais recente de cada par — é o custo que vale hoje. Serve pro
 // dashboard converter quantidade em dinheiro, que é a linguagem da diretoria.
+// Preço de tabela do produto: TGFEXC é a tabela de preços e TGFTAB guarda as
+// versões dela (uma por data de vigência). Vale a versão vigente mais recente
+// — TGFPRO não tem preço de venda neste ambiente (não existe VLRVENDA lá).
+//
+// O lote é de 900 porque o Oracle aceita no máximo 1000 expressões num IN
+// (ORA-01795), e um dia de notas passa bem disso.
+const PRODUTOS_POR_CONSULTA = 900;
+
+export async function getPrecosDeTabela(codigosProduto: string[]): Promise<Map<string, number>> {
+  const precos = new Map<string, number>();
+
+  const unicos = [
+    ...new Set(codigosProduto.map((c) => Number(c)).filter((n) => Number.isFinite(n))),
+  ];
+  if (unicos.length === 0) return precos;
+
+  for (let inicio = 0; inicio < unicos.length; inicio += PRODUTOS_POR_CONSULTA) {
+    const lote = unicos.slice(inicio, inicio + PRODUTOS_POR_CONSULTA);
+    const sql = `
+      SELECT "codigoProduto", "precoTabela"
+      FROM (
+        SELECT
+          EXC.CODPROD  AS "codigoProduto",
+          EXC.VLRVENDA AS "precoTabela",
+          ROW_NUMBER() OVER (
+            PARTITION BY EXC.CODPROD ORDER BY TAB.DTVIGOR DESC, EXC.NUTAB DESC
+          ) AS RN
+        FROM TGFEXC EXC
+        INNER JOIN TGFTAB TAB ON TAB.NUTAB = EXC.NUTAB
+        WHERE EXC.CODPROD IN (${lote.join(', ')})
+          AND TAB.DTVIGOR <= SYSDATE
+          AND EXC.VLRVENDA IS NOT NULL
+      )
+      WHERE RN = 1
+    `;
+
+    const linhas = await executarQuery<{ codigoProduto: number; precoTabela: number }>(sql);
+    for (const linha of linhas) {
+      precos.set(String(linha.codigoProduto), Number(linha.precoTabela) || 0);
+    }
+  }
+
+  return precos;
+}
+
 export async function getCustosSemIcms(
   pares: { codigoProduto: string; empresaCodigo: string }[]
 ): Promise<Map<string, number>> {

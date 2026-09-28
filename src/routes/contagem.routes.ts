@@ -119,6 +119,9 @@ const atribuirContagemSchema = z.object({
   custoMaximo: z.coerce.number().optional(),
   // Rótulo do lote pra achar a tarefa depois na aba Contagens.
   tarefaNome: z.string().trim().max(80).optional(),
+  // Tarefa já criada pelo gestor: é o que deixa vários prédios entrarem na
+  // MESMA tarefa em vez de virarem uma tarefa por prédio.
+  tarefaId: z.string().min(1).optional(),
 });
 
 contagemRouter.post('/atribuir', autenticar, exigirAdmin, async (req, res) => {
@@ -483,8 +486,12 @@ const atribuirItensSchema = z.object({
     .array(z.object({ codigoProduto: z.string().min(1), localCodigo: z.string().min(1) }))
     .min(1),
   atribuidoParaId: z.string().min(1),
+  // Mais de uma pessoa: os itens são repartidos em rodízio entre elas.
+  atribuidoParaIds: z.array(z.string().min(1)).optional(),
   // Rótulo do lote pra achar a tarefa depois na aba Contagens.
   tarefaNome: z.string().trim().max(80).optional(),
+  // Tarefa já criada pelo gestor, quando ele criou antes de escolher o escopo.
+  tarefaId: z.string().min(1).optional(),
 });
 
 contagemRouter.post('/atribuir-itens', autenticar, exigirAdmin, async (req, res) => {
@@ -544,6 +551,9 @@ const avulsaSchema = z.object({
   tarefaNome: z.string().trim().max(80).optional(),
   motivo: z.string().trim().max(200).optional(),
   observacao: z.string().trim().max(500).optional(),
+  // Evidência do bipe; não recorta a conferência (ver o service).
+  codigoLocalBipado: z.string().trim().max(60).optional(),
+  codigoProdutoBipado: z.string().trim().max(60).optional(),
 });
 
 // Contagem avulsa: produto e quantidade, sem endereço. A conferência é
@@ -566,6 +576,76 @@ contagemRouter.post('/avulsa', autenticar, async (req, res) => {
       .status(400)
       .json({ erro: error instanceof Error ? error.message : 'Não foi possível iniciar a contagem.' });
   }
+});
+
+const predioSchema = z.object({
+  tarefaId: z.string().min(1),
+  empresaCodigo: z.string().min(1),
+  rua: z.string().nullable().optional(),
+  predio: z.string().nullable().optional(),
+});
+
+const encerrarPredioSchema = predioSchema.extend({
+  modo: z.enum(['NAO_ENCONTRADOS', 'DEIXAR_PENDENTE']),
+});
+
+// Encerrar um prédio é do colaborador, não do gestor: é ele quem está na
+// frente da prateleira e sabe se varreu tudo.
+contagemRouter.post('/predio/encerrar', autenticar, async (req, res) => {
+  const parse = encerrarPredioSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Informe a tarefa e o prédio.' });
+    return;
+  }
+
+  try {
+    res.json(
+      await contagemService.encerrarPredio({
+        tarefaId: parse.data.tarefaId,
+        empresaCodigo: parse.data.empresaCodigo,
+        rua: parse.data.rua ?? null,
+        predio: parse.data.predio ?? null,
+        modo: parse.data.modo,
+        usuarioId: req.usuario!.sub,
+      })
+    );
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível encerrar o prédio.' });
+  }
+});
+
+contagemRouter.post('/predio/reabrir', autenticar, async (req, res) => {
+  const parse = predioSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Informe a tarefa e o prédio.' });
+    return;
+  }
+
+  await contagemService.reabrirPredio({
+    tarefaId: parse.data.tarefaId,
+    empresaCodigo: parse.data.empresaCodigo,
+    rua: parse.data.rua ?? null,
+    predio: parse.data.predio ?? null,
+    usuarioId: req.usuario!.sub,
+  });
+  res.status(204).end();
+});
+
+// O gestor vê os prédios encerrados por todo mundo; o colaborador, só os
+// dele — encerrar é uma declaração pessoal sobre o que aquela pessoa varreu.
+contagemRouter.get('/predios-encerrados', autenticar, async (req, res) => {
+  const { tarefaId } = req.query;
+  if (typeof tarefaId !== 'string' || !tarefaId) {
+    res.status(400).json({ erro: 'Informe a tarefa.' });
+    return;
+  }
+
+  const ehAdmin = req.usuario!.role === 'ADMIN';
+  res.json(
+    await contagemService.getPrediosEncerrados(tarefaId, ehAdmin ? undefined : req.usuario!.sub)
+  );
 });
 
 const apagarItensSchema = z.object({ ids: z.array(z.string().min(1)).min(1) });

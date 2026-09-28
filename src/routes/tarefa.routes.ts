@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { autenticar, exigirAdmin } from '../middleware/auth';
 import { prisma } from '../lib/prisma';
 import * as tarefaService from '../services/tarefa.service';
+import * as tratamentoService from '../services/tratamentoMovDiaria.service';
 
 // Mesma regra das outras rotas: a loja vem do banco, não do token — o token
 // dos aparelhos já instalados não traz esse campo.
@@ -114,5 +115,51 @@ tarefaRouter.delete('/:id', autenticar, exigirAdmin, async (req, res) => {
     res.json(await tarefaService.apagarTarefa((req.params as { id: string }).id));
   } catch (error) {
     res.status(400).json({ erro: error instanceof Error ? error.message : 'Não foi possível apagar.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tratamento da Mov. Diária: a apuração que o gestor faz depois da coleta
+// ---------------------------------------------------------------------------
+
+tarefaRouter.get('/:id/mov-diaria', autenticar, exigirAdmin, async (req, res) => {
+  try {
+    res.json(await tratamentoService.getTratamentoDaTarefa((req.params as { id: string }).id));
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível carregar a apuração.' });
+  }
+});
+
+// Número = corrige aquele campo e marca como editado à mão.
+// null   = desfaz a correção e volta ao que o Sankhya diz.
+// ausente = não mexe naquele campo.
+const tratamentoSchema = z.object({
+  chave: z.string().min(1),
+  precoTabela: z.number().nullable().optional(),
+  quantidadeEntrada: z.number().nullable().optional(),
+  quantidadeSaida: z.number().nullable().optional(),
+  comentario: z.string().max(500).nullable().optional(),
+});
+
+tarefaRouter.patch('/:id/mov-diaria', autenticar, exigirAdmin, async (req, res) => {
+  const parse = tratamentoSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Corpo da requisição inválido.', detalhes: parse.error.flatten() });
+    return;
+  }
+
+  try {
+    await tratamentoService.salvarTratamento({
+      ...parse.data,
+      tarefaId: (req.params as { id: string }).id,
+      tratadoPorId: req.usuario!.sub,
+    });
+    res.json(await tratamentoService.getTratamentoDaTarefa((req.params as { id: string }).id));
+  } catch (error) {
+    res
+      .status(400)
+      .json({ erro: error instanceof Error ? error.message : 'Não foi possível salvar a apuração.' });
   }
 });

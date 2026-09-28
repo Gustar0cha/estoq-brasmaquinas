@@ -323,15 +323,26 @@ export async function getPrediosDisponiveis(
 // contagem aberta não cria outra: os itens novos entram na tarefa que já
 // existe, com o saldo do dia da adição — foi o que a operação combinou, pra
 // não picar o mesmo trabalho em vários lotes.
+//
+// Quando a tarefa já existe (o gestor criou primeiro, escolheu quem vai
+// contar e só então escolheu o escopo), `tarefaExistenteId` manda: não se
+// procura por nome nem se cria outra.
 async function acharOuCriarTarefa(
   nome: string,
   cicloId: string,
   criadaPorId: string,
-  responsaveisIds: string[]
+  responsaveisIds: string[],
+  tarefaExistenteId?: string
 ): Promise<string> {
-  const existente = await prisma.tarefa.findFirst({
-    where: { nome, tipo: 'CONTAGEM', cicloId, status: 'ABERTA' },
-  });
+  const existente = tarefaExistenteId
+    ? await prisma.tarefa.findUnique({ where: { id: tarefaExistenteId } })
+    : await prisma.tarefa.findFirst({
+        where: { nome, tipo: 'CONTAGEM', cicloId, status: 'ABERTA' },
+      });
+
+  if (tarefaExistenteId && !existente) {
+    throw new Error('Essa tarefa não existe mais.');
+  }
 
   const tarefaId =
     existente?.id ??
@@ -379,6 +390,9 @@ export interface AtribuirContagemPredioInput {
   // Rótulo do lote, dado pelo admin ("Rua 2 manhã"). Só serve pra achar a
   // tarefa depois na aba Contagens; vazio cai no nome do prédio.
   tarefaNome?: string;
+  // Tarefa já criada pelo gestor; quando vem, manda sobre o nome. É o que
+  // permite distribuir vários prédios dentro da MESMA tarefa.
+  tarefaId?: string;
 }
 
 // Ninguém recebe prateleira de outra loja: se o colaborador tem filial
@@ -471,7 +485,8 @@ export async function atribuirContagemPredio(
     rotuloTarefa,
     ciclo.id,
     input.atribuidoPorId,
-    responsaveis
+    responsaveis,
+    input.tarefaId
   );
 
   await prisma.contagemItem.createMany({
@@ -976,6 +991,56 @@ export async function registrarItemForaDoLugar(
 // (ex: EAN-13 impresso pela TETIS/WEG/etc), que nunca vai bater com o código
 // interno do produto (CODPROD) — comparar os dois bloquearia bipes 100%
 // corretos.
+// O bipe do local vale pro PRÉDIO inteiro, não para uma prateleira só.
+//
+// Antes, cada item exigia o bipe da sua própria etiqueta: quem contava um
+// prédio de 46 itens bipava o mesmo prédio 46 vezes, subindo e descendo a
+// escada com o celular na mão. O bipe existe pra provar que a pessoa esteve
+// fisicamente naquele endereço — e uma etiqueta qualquer do mesmo prédio
+// prova exatamente isso.
+//
+// A validação continua existindo: o código lido tem que ser de um local que
+// esteja nesta contagem, no mesmo prédio e na mesma empresa. Bipar a etiqueta
+// da Rua 3 não libera contar a Rua 7.
+async function conferirBipeDoLocal(
+  item: {
+    localCodigo: string;
+    local: string;
+    cicloId: string | null;
+    empresaCodigo: string;
+    rua: string | null;
+    predio: string | null;
+  },
+  codigoLocalBipado: string
+): Promise<void> {
+  if (codigoLocalBipado === item.localCodigo) return;
+
+  // Item sem endereço (área solta, contagem avulsa) não tem prédio a que
+  // pertencer: aceitar "qualquer local sem rua" liberaria o galpão inteiro.
+  if (item.rua === null && item.predio === null) {
+    throw new Error(
+      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
+    );
+  }
+
+  const doMesmoPredio = await prisma.contagemItem.findFirst({
+    where: {
+      cicloId: item.cicloId,
+      empresaCodigo: item.empresaCodigo,
+      localCodigo: codigoLocalBipado,
+      rua: item.rua,
+      predio: item.predio,
+    },
+    select: { id: true },
+  });
+
+  if (!doMesmoPredio) {
+    throw new Error(
+      `Essa etiqueta não é do ${rotuloDoGrupo(item.rua, item.predio)} — bipe uma etiqueta desse prédio.`
+    );
+  }
+}
+
 export async function iniciarContagemItem(input: IniciarContagemItemInput): Promise<ContagemItemDTO> {
   const item = await prisma.contagemItem.findUnique({ where: { id: input.itemId } });
   if (!item) {
@@ -987,11 +1052,7 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
   if (ehLocalDeQuarentena(item.local)) {
     throw new Error(`${item.local} é área de quarentena — produto em quarentena não entra na contagem.`);
   }
-  if (input.codigoLocalBipado !== item.localCodigo) {
-    throw new Error(
-      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
-    );
-  }
+  await conferirBipeDoLocal(item, input.codigoLocalBipado);
 
   const atualizado = await prisma.contagemItem.update({
     where: { id: item.id },
@@ -1036,11 +1097,7 @@ export async function iniciarSegundaContagemItem(
   if (item.quantidadeConferida2 !== null) {
     throw new Error('A 2ª contagem desse item já foi registrada.');
   }
-  if (codigoLocalBipado !== item.localCodigo) {
-    throw new Error(
-      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
-    );
-  }
+  await conferirBipeDoLocal(item, codigoLocalBipado);
 
   const atualizado = await prisma.contagemItem.update({
     where: { id: itemId },
@@ -1694,8 +1751,14 @@ export interface AtribuirContagemItensInput {
   empresaCodigo: string;
   itens: { codigoProduto: string; localCodigo: string }[];
   atribuidoParaId: string;
+  // Mais de uma pessoa no mesmo lote: os itens são repartidos em rodízio,
+  // igual à atribuição por prédio. Sem isso, escolher três pessoas mandava
+  // tudo pra primeira e as outras duas ficavam com a tarefa vazia.
+  atribuidoParaIds?: string[];
   atribuidoPorId: string;
   tarefaNome?: string;
+  // Tarefa já criada pelo gestor; quando vem, manda sobre o nome.
+  tarefaId?: string;
 }
 
 // Atribui uma seleção avulsa de itens, sem precisar mandar o prédio inteiro.
@@ -1731,12 +1794,20 @@ export async function atribuirContagemItens(
 
   const ciclo = await garantirCicloAberto(input.atribuidoPorId);
   const rotuloTarefa = input.tarefaNome?.trim() || `Itens avulsos · ${new Date().toLocaleDateString('pt-BR')}`;
-  const tarefaId = await acharOuCriarTarefa(rotuloTarefa, ciclo.id, input.atribuidoPorId, [
-    input.atribuidoParaId,
-  ]);
+  const responsaveis =
+    input.atribuidoParaIds && input.atribuidoParaIds.length > 0
+      ? [...new Set(input.atribuidoParaIds)]
+      : [input.atribuidoParaId];
+  const tarefaId = await acharOuCriarTarefa(
+    rotuloTarefa,
+    ciclo.id,
+    input.atribuidoPorId,
+    responsaveis,
+    input.tarefaId
+  );
 
   await prisma.contagemItem.createMany({
-    data: novos.map((i) => {
+    data: novos.map((i, indice) => {
       const { rua, predio, nivel } = resolverLocalizacao(
         i.local,
         paisPorLocal.get(i.localCodigo) ?? null,
@@ -1760,7 +1831,7 @@ export async function atribuirContagemItens(
         rua,
         predio,
         nivel,
-        atribuidoParaId: input.atribuidoParaId,
+        atribuidoParaId: responsaveis[indice % responsaveis.length],
         atribuidoPorId: input.atribuidoPorId,
         tarefaNome: rotuloTarefa,
       };
@@ -1768,13 +1839,19 @@ export async function atribuirContagemItens(
   });
 
   const nomeAdmin = await nomeUsuario(input.atribuidoPorId);
-  await notificarUsuario(
-    'ATRIBUICAO_CONTAGEM',
-    `${input.empresaCodigo}|itens`,
-    'Nova contagem atribuída',
-    `${nomeAdmin} atribuiu ${novos.length} ite${novos.length === 1 ? 'm' : 'ns'} pra você contar.`,
-    input.atribuidoParaId
-  );
+  for (const [posicao, responsavel] of responsaveis.entries()) {
+    // Quantos couberam a ESTA pessoa: dizer o total do lote pra quem recebeu
+    // um terço dele faz a pessoa procurar itens que não são dela.
+    const quantos = novos.filter((_, indice) => indice % responsaveis.length === posicao).length;
+    if (quantos === 0) continue;
+    await notificarUsuario(
+      'ATRIBUICAO_CONTAGEM',
+      `${input.empresaCodigo}|itens`,
+      'Nova contagem atribuída',
+      `${nomeAdmin} atribuiu ${quantos} ite${quantos === 1 ? 'm' : 'ns'} pra você contar.`,
+      responsavel
+    );
+  }
 
   return { criados: novos.length };
 }
@@ -1825,6 +1902,138 @@ export async function registrarNaoEncontrado(
 }
 
 // ---------------------------------------------------------------------------
+// Encerrar um prédio: o colaborador declara que varreu aquele endereço
+// ---------------------------------------------------------------------------
+
+// Os dois caminhos são decisões diferentes e o colaborador escolhe na hora:
+//
+// NAO_ENCONTRADOS — varri o prédio e o que sobrou não estava lá. Registra 0
+//   nos pendentes, que é o que um inventário físico de fato afirma. Vira
+//   divergência de verdade no relatório, então o app diz quantos antes.
+// DEIXAR_PENDENTE — terminei a minha parte, o resto fica pra outra pessoa.
+//   Não toca em item nenhum; só tira o prédio da frente de quem encerrou.
+export type ModoEncerramento = 'NAO_ENCONTRADOS' | 'DEIXAR_PENDENTE';
+
+export interface EncerrarPredioInput {
+  tarefaId: string;
+  usuarioId: string;
+  empresaCodigo: string;
+  rua: string | null;
+  predio: string | null;
+  modo: ModoEncerramento;
+}
+
+export interface PredioEncerradoDTO {
+  tarefaId: string;
+  empresaCodigo: string;
+  rua: string | null;
+  predio: string | null;
+  pendentes: number;
+  encerradoEm: string;
+}
+
+function paraTexto(valor: string | null): string {
+  return valor ?? '';
+}
+
+function paraNulo(valor: string): string | null {
+  return valor === '' ? null : valor;
+}
+
+export async function encerrarPredio(
+  input: EncerrarPredioInput
+): Promise<{ registradosZero: number; pendentes: number }> {
+  // Só o que É desta pessoa e ainda não produziu número nenhum. Item em 2ª
+  // contagem tem outro dono e outra regra: registrar 0 nele seria apagar a
+  // recontagem que o gestor pediu.
+  const abertos = await prisma.contagemItem.findMany({
+    where: {
+      tarefaId: input.tarefaId,
+      empresaCodigo: input.empresaCodigo,
+      rua: input.rua,
+      predio: input.predio,
+      status: { in: ['PENDENTE', 'EM_ANDAMENTO'] },
+      quantidadeConferida: null,
+      atribuidoParaId: input.usuarioId,
+    },
+    select: { id: true },
+  });
+
+  let registradosZero = 0;
+  if (input.modo === 'NAO_ENCONTRADOS') {
+    // Em série, não em paralelo: cada registro dispara notificação e releitura
+    // de saldo, e trinta ao mesmo tempo derrubariam a conexão do Sankhya.
+    for (const item of abertos) {
+      await registrarNaoEncontrado(item.id, input.usuarioId);
+      registradosZero += 1;
+    }
+  }
+
+  const pendentes = input.modo === 'NAO_ENCONTRADOS' ? 0 : abertos.length;
+
+  const chave = {
+    tarefaId: input.tarefaId,
+    usuarioId: input.usuarioId,
+    empresaCodigo: input.empresaCodigo,
+    rua: paraTexto(input.rua),
+    predio: paraTexto(input.predio),
+  };
+
+  await prisma.predioEncerrado.upsert({
+    where: {
+      tarefaId_usuarioId_empresaCodigo_rua_predio: chave,
+    },
+    create: { ...chave, pendentes },
+    update: { pendentes, encerradoEm: new Date() },
+  });
+
+  return { registradosZero, pendentes };
+}
+
+// Encerrar não pode ser porta de mão única: quem fechou o prédio sem querer
+// precisa conseguir voltar. O que foi registrado como 0 continua registrado —
+// desfazer contagem é outra coisa, e é decisão do gestor.
+export async function reabrirPredio(input: {
+  tarefaId: string;
+  usuarioId: string;
+  empresaCodigo: string;
+  rua: string | null;
+  predio: string | null;
+}): Promise<void> {
+  await prisma.predioEncerrado
+    .delete({
+      where: {
+        tarefaId_usuarioId_empresaCodigo_rua_predio: {
+          tarefaId: input.tarefaId,
+          usuarioId: input.usuarioId,
+          empresaCodigo: input.empresaCodigo,
+          rua: paraTexto(input.rua),
+          predio: paraTexto(input.predio),
+        },
+      },
+    })
+    .catch(() => undefined);
+}
+
+export async function getPrediosEncerrados(
+  tarefaId: string,
+  usuarioId?: string
+): Promise<PredioEncerradoDTO[]> {
+  const linhas = await prisma.predioEncerrado.findMany({
+    where: { tarefaId, ...(usuarioId ? { usuarioId } : {}) },
+  });
+
+  return linhas.map((linha) => ({
+    tarefaId: linha.tarefaId,
+    empresaCodigo: linha.empresaCodigo,
+    rua: paraNulo(linha.rua),
+    predio: paraNulo(linha.predio),
+    pendentes: linha.pendentes,
+    encerradoEm: linha.encerradoEm.toISOString(),
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Contagem avulsa: o operador escolhe o endereço, sem esperar atribuição
 // ---------------------------------------------------------------------------
 
@@ -1834,6 +2043,11 @@ export interface ContagemAvulsaInput {
   quantidadeConferida: number;
   // Rótulo do lote, pra achar essas contagens depois na aba Contagens.
   tarefaNome?: string;
+  // Os bipes ficam como evidência de que a pessoa esteve na prateleira. Não
+  // recortam nada: a avulsa continua conferindo contra o saldo do produto
+  // somado na loja inteira, porque o endereço é justamente o que não se sabe.
+  codigoLocalBipado?: string;
+  codigoProdutoBipado?: string;
   motivo?: string;
   observacao?: string;
 }
@@ -1904,6 +2118,8 @@ export async function registrarContagemAvulsa(
       diferenca,
       motivo: diferenca !== 0 ? (input.motivo ?? 'Contagem avulsa') : null,
       observacao: input.observacao?.trim() || null,
+      codigoLocalBipado: input.codigoLocalBipado ?? null,
+      codigoProdutoBipado: input.codigoProdutoBipado ?? null,
       conferidoPorId: input.usuarioId,
       dataConferencia: agora,
     },

@@ -40,6 +40,8 @@ model Usuario {
 
   tarefasCriadas       Tarefa[]            @relation("TarefaCriadaPor")
   tarefasResponsavel   TarefaResponsavel[]
+  prediosEncerrados    PredioEncerrado[]
+  tratamentosMovDiaria TratamentoMovDiaria[]
   contagemItensIniciados      ContagemItem[] @relation("ContagemIniciadaPor")
   contagemItensConferidos1    ContagemItem[] @relation("ContagemConferidaPor1")
   contagemItensAtribuidos2    ContagemItem[] @relation("ContagemItensAtribuidos2")
@@ -119,7 +121,7 @@ model ItemConferido {
 // mesmo formato já usado em conferenciaDiaria.service.ts.
 model ItemAtribuicao {
   id            String   @id @default(uuid())
-  chave         String   @unique
+  chave         String
   empresaCodigo String
   codigoProduto String
   localCodigo   String
@@ -129,6 +131,8 @@ model ItemAtribuicao {
   tarefaId      String?
   atualizadoEm  DateTime @updatedAt
 
+  @@unique([chave, tarefaId])
+  @@index([tarefaId])
   @@map("item_atribuicoes")
 }
 
@@ -172,7 +176,7 @@ model ItemConferenciaResultado {
   tarefa   Tarefa? @relation(fields: [tarefaId], references: [id])
   tarefaId String?
 
-  @@unique([chave, numeroContagem])
+  @@unique([chave, numeroContagem, tarefaId])
   @@map("item_conferencia_resultados")
 }
 
@@ -182,13 +186,17 @@ model ItemConferenciaResultado {
 // `usuarioId` atribuído como "aguardando 2ª contagem".
 model ItemSolicitacaoSegundaContagem {
   id              String   @id @default(uuid())
-  chave           String   @unique
+  chave           String
   solicitadoPor   Usuario  @relation("SolicitacoesFeitas", fields: [solicitadoPorId], references: [id])
   solicitadoPorId String
   usuario         Usuario? @relation("SolicitacoesAtribuidas", fields: [usuarioId], references: [id])
   usuarioId       String?
+  // A recontagem pertence à tarefa em que a divergência apareceu: sem isso,
+  // um pedido feito ontem reaparecia colado no item de uma tarefa de hoje.
+  tarefaId        String?
   criadoEm        DateTime @default(now())
 
+  @@unique([chave, tarefaId])
   @@map("item_solicitacoes_segunda_contagem")
 }
 
@@ -323,12 +331,76 @@ model Tarefa {
   fechadaEm   DateTime?
   observacao  String?
 
-  responsaveis    TarefaResponsavel[]
-  contagemItens   ContagemItem[]
-  itemAtribuicoes ItemAtribuicao[]
-  itemResultados  ItemConferenciaResultado[]
+  responsaveis      TarefaResponsavel[]
+  contagemItens     ContagemItem[]
+  itemAtribuicoes   ItemAtribuicao[]
+  itemResultados    ItemConferenciaResultado[]
+  prediosEncerrados PredioEncerrado[]
+  tratamentos       TratamentoMovDiaria[]
 
   @@map("tarefas")
+}
+
+// O que o gestor apurou num item de Mov. Diária depois que o colaborador
+// encerrou a tarefa.
+//
+// O colaborador só COLETA: ele conta às cegas e não vê esperado, conferido
+// nem diferença. A explicação vem depois, aqui — preço de tabela e quanto
+// entrou e saiu chegam prontos do Sankhya, e o gestor corrige o que estiver
+// errado. Só o que ele encostou fica marcado como editado; o resto continua
+// acompanhando o Sankhya se o número de lá mudar.
+model TratamentoMovDiaria {
+  id       String @id @default(uuid())
+  tarefa   Tarefa @relation(fields: [tarefaId], references: [id], onDelete: Cascade)
+  tarefaId String
+  // "empresa|produto|local", a mesma chave da conferência.
+  chave String
+
+  precoTabela       Float?
+  quantidadeEntrada Float?
+  quantidadeSaida   Float?
+
+  editadoPreco   Boolean @default(false)
+  editadoEntrada Boolean @default(false)
+  editadoSaida   Boolean @default(false)
+
+  comentario String?
+
+  tratadoPor   Usuario @relation(fields: [tratadoPorId], references: [id])
+  tratadoPorId String
+  atualizadoEm DateTime @updatedAt
+
+  @@unique([tarefaId, chave])
+  @@map("tratamentos_mov_diaria")
+}
+
+// Um prédio que o colaborador declarou terminado.
+//
+// Sem isso, um prédio já varrido continuava na lista dele igual aos outros,
+// e a única forma de tirá-lo da frente era contar item por item o que não
+// estava lá. Encerrar tem dois caminhos, e o colaborador escolhe na hora:
+// registrar 0 no que sobrou (não achei) ou deixar pendente pra outra pessoa.
+// `pendentes` guarda quantos ficaram sem contar, que é o que o gestor
+// precisa ver pra saber se o prédio foi varrido ou abandonado.
+model PredioEncerrado {
+  id       String @id @default(uuid())
+  tarefa   Tarefa @relation(fields: [tarefaId], references: [id], onDelete: Cascade)
+  tarefaId String
+
+  empresaCodigo String
+  // String vazia, não null: a chave única precisa comparar e no Postgres
+  // NULL nunca é igual a NULL — dois "sem endereço" passariam batido.
+  rua    String
+  predio String
+
+  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+  usuarioId String
+
+  pendentes   Int      @default(0)
+  encerradoEm DateTime @default(now())
+
+  @@unique([tarefaId, usuarioId, empresaCodigo, rua, predio])
+  @@map("predios_encerrados")
 }
 
 // Mais de uma pessoa na mesma tarefa. Os itens continuam tendo um dono cada
