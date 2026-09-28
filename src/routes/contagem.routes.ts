@@ -102,6 +102,33 @@ contagemRouter.get('/produtos', autenticar, async (req, res) => {
   res.json(await contagemService.buscarProdutos(busca));
 });
 
+// Traduz o código que a câmera leu para o produto do Sankhya. Pode devolver
+// nenhum (código nunca visto), um (segue direto) ou vários (o mesmo EAN de
+// fabricante em produtos diferentes — aí quem decide é quem está com a peça
+// na mão).
+contagemRouter.get('/produto-do-bipe', autenticar, async (req, res) => {
+  const { codigo } = req.query;
+  if (typeof codigo !== 'string' || codigo.trim().length === 0) {
+    res.json([]);
+    return;
+  }
+  res.json(await contagemService.resolverProdutoDoBipe(codigo));
+});
+
+const conferirEtiquetaSchema = z.object({
+  empresaCodigo: z.string().min(1),
+  rua: z.string().nullable(),
+  predio: z.string().nullable(),
+  codigo: z.string().min(1),
+});
+
+// "Essa etiqueta é do prédio que eu abri?" — perguntado uma vez por prédio,
+// no momento do bipe, pra o erro aparecer na hora e não itens depois.
+contagemRouter.post('/conferir-etiqueta', autenticar, async (req, res) => {
+  const dados = conferirEtiquetaSchema.parse(req.body);
+  res.json(await contagemService.conferirEtiquetaDoPredio(dados));
+});
+
 const atribuirContagemSchema = z.object({
   rua: z.string().nullable(),
   predio: z.string().nullable(),

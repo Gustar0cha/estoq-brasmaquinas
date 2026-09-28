@@ -852,6 +852,79 @@ export async function buscarProdutos(termo: string): Promise<ProdutoBuscaSankhya
   return buscarProdutosSankhya(termo);
 }
 
+export interface ProdutoDoBipe extends ProdutoBuscaSankhya {
+  // Como o produto foi identificado — a tela usa isso pra decidir se pode
+  // seguir sozinha ou se precisa perguntar.
+  origem: 'CODIGO_INTERNO' | 'BIPE_ANTERIOR';
+}
+
+// Descobre QUAL produto é o código que a câmera leu.
+//
+// Medido na produção: em 400 bipes gravados, só 25 (6%) eram o CODPROD do
+// Sankhya. Nos outros 94% a etiqueta é o EAN do fabricante, que o ERP não tem
+// cadastrado (TGFPRO.CODBARRA não existe aqui) — não há tabela que traduza.
+//
+// O que existe é histórico: cada contagem já feita gravou o código lido ao
+// lado do produto que a pessoa confirmou estar contando. São 558 códigos
+// distintos, e só 11 deles (2%) apontam pra mais de um produto. Isso é um
+// dicionário — e ele cresce sozinho a cada item contado.
+//
+// Quando o código continua desconhecido, quem responde é a pessoa: a tela cai
+// na lista do prédio. Ela escolhe, e o par fica aprendido pro próximo bipe.
+export async function resolverProdutoDoBipe(codigo: string): Promise<ProdutoDoBipe[]> {
+  const lido = codigo.trim();
+  if (!lido) return [];
+
+  const [porContagem, porConferencia] = await Promise.all([
+    prisma.contagemItem.findMany({
+      where: {
+        OR: [{ codigoProdutoBipado: lido }, { codigoProdutoBipado2: lido }],
+      },
+      select: { codigoProduto: true, descricao: true, unidade: true },
+      distinct: ['codigoProduto'],
+      take: 20,
+    }),
+    prisma.itemConferenciaResultado.findMany({
+      where: { codigoProdutoBipado: lido },
+      select: { codigoProduto: true, descricao: true },
+      distinct: ['codigoProduto'],
+      take: 20,
+    }),
+  ]);
+
+  const porCodigo = new Map<string, ProdutoDoBipe>();
+  for (const i of porContagem) {
+    porCodigo.set(i.codigoProduto, {
+      codigoProduto: i.codigoProduto,
+      descricao: i.descricao,
+      unidade: i.unidade,
+      origem: 'BIPE_ANTERIOR',
+    });
+  }
+  for (const i of porConferencia) {
+    if (porCodigo.has(i.codigoProduto)) continue;
+    porCodigo.set(i.codigoProduto, {
+      codigoProduto: i.codigoProduto,
+      descricao: i.descricao,
+      unidade: '',
+      origem: 'BIPE_ANTERIOR',
+    });
+  }
+
+  // O código lido pode ser o próprio CODPROD (etiqueta interna do galpão).
+  // Esse caminho é certeza, não palpite, então vem primeiro na lista.
+  if (/^[0-9]+$/.test(lido)) {
+    const doSankhya = await buscarProdutosSankhya(lido);
+    const exato = doSankhya.find((p) => p.codigoProduto === lido);
+    if (exato) {
+      porCodigo.delete(exato.codigoProduto);
+      return [{ ...exato, origem: 'CODIGO_INTERNO' }, ...porCodigo.values()];
+    }
+  }
+
+  return [...porCodigo.values()];
+}
+
 export interface RegistrarItemForaDoLugarInput {
   usuarioId: string;
   codigoProduto: string;
@@ -1039,6 +1112,50 @@ async function conferirBipeDoLocal(
       `Essa etiqueta não é do ${rotuloDoGrupo(item.rua, item.predio)} — bipe uma etiqueta desse prédio.`
     );
   }
+}
+
+export type ConferenciaEtiqueta =
+  | { resultado: 'DESTE_PREDIO'; local: string }
+  | { resultado: 'OUTRO_PREDIO'; local: string; onde: string }
+  | { resultado: 'DESCONHECIDA' };
+
+// Responde, na hora do bipe, se a etiqueta lida é mesmo do prédio aberto.
+//
+// A validação de verdade sempre existiu em conferirBipeDoLocal, mas só rodava
+// quando o item ia ser contado. Na prática o colaborador bipava a etiqueta
+// errada, via "Prédio bipado ✓" e só descobria o erro itens depois — ou nunca,
+// se desistisse do prédio. Perguntar aqui custa um request por prédio.
+//
+// O app não consegue decidir isso sozinho: ele só conhece os locais que estão
+// na tarefa dele, e um prédio tem níveis que podem não estar nela (Rua 8
+// Prédio 1 tem 6 níveis). Rejeitar pelo que o app conhece recusaria etiqueta
+// boa de nível vizinho.
+export async function conferirEtiquetaDoPredio(input: {
+  empresaCodigo: string;
+  rua: string | null;
+  predio: string | null;
+  codigo: string;
+}): Promise<ConferenciaEtiqueta> {
+  // Onde fica esse código, fisicamente. O endereçamento é estável: medido na
+  // produção, nenhum localCodigo aponta pra mais de um prédio.
+  const local = await prisma.contagemItem.findFirst({
+    where: { localCodigo: input.codigo.trim(), empresaCodigo: input.empresaCodigo },
+    select: { local: true, rua: true, predio: true },
+  });
+
+  // Local que nunca entrou numa contagem. Não dá pra afirmar que está errado,
+  // então não trava: quem decide é o servidor na hora de contar o item.
+  if (!local) return { resultado: 'DESCONHECIDA' };
+
+  if (local.rua === input.rua && local.predio === input.predio) {
+    return { resultado: 'DESTE_PREDIO', local: local.local };
+  }
+
+  return {
+    resultado: 'OUTRO_PREDIO',
+    local: local.local,
+    onde: rotuloDoGrupo(local.rua, local.predio),
+  };
 }
 
 export async function iniciarContagemItem(input: IniciarContagemItemInput): Promise<ContagemItemDTO> {
