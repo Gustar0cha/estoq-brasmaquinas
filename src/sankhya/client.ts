@@ -1276,32 +1276,83 @@ function sanitizarTermoBusca(termo: string): string {
     .slice(0, 60);
 }
 
-// Busca de produto por código ou descrição — usada quando o colaborador acha
-// um item que não estava na lista dele (item fora do lugar) e precisa dizer
-// QUAL produto é. Não dá pra resolver isso pelo código de barras bipado:
-// os produtos aqui não têm CODBARRA cadastrado no Sankhya, o que a câmera lê
-// é o EAN do fabricante.
+// Tira acento no Oracle, pra "seguranca" achar "SEGURANÇA". Quem digita com o
+// teclado do celular, de luva, não acentua.
+const SEM_ACENTO = (coluna: string) =>
+  `TRANSLATE(UPPER(${coluna}), 'ÁÀÂÃÉÊÍÓÔÕÚÜÇ', 'AAAAEEIOOOUUC')`;
+
+function semAcento(texto: string): string {
+  return texto.normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+// Busca de produto por código ou descrição — é a saída de quem bipou um código
+// que o ERP não conhece (ver resolverProdutoDoBipe) e precisa dizer QUAL
+// produto tem na mão.
+//
+// Cada palavra é procurada por conta própria, em qualquer ordem. Antes a
+// descrição inteira era um LIKE só: quem digitava "luva tigre" não achava
+// "LUVA DE SEGURANÇA TIGRE", porque as duas palavras não estão grudadas. Era
+// preciso acertar a descrição desde o começo, exatamente — na prática, saber a
+// resposta antes de perguntar.
 export async function buscarProdutosSankhya(termo: string): Promise<ProdutoBuscaSankhya[]> {
-  const texto = sanitizarTermoBusca(termo);
+  const texto = sanitizarTermoBusca(semAcento(termo));
   if (texto.length < 2) return [];
+
+  const palavras = texto.split(/\s+/).filter((p) => p.length > 0).slice(0, 6);
+  if (palavras.length === 0) return [];
 
   // Código digitado inteiro vem primeiro na lista: sem isso o match exato fica
   // enterrado no meio das descrições que contêm o mesmo número.
   const ehCodigo = /^[0-9]+$/.test(texto) && Number.isFinite(Number(texto));
   const codigo = Number(texto);
-  const filtroCodigo = ehCodigo ? `PRO.CODPROD = ${codigo} OR` : '';
-  const ordemCodigo = ehCodigo ? `CASE WHEN PRO.CODPROD = ${codigo} THEN 0 ELSE 1 END,` : '';
+
+  // Todas as palavras têm que aparecer — é o que separa "luva tigre" de
+  // "luva" sozinha, que traz o catálogo inteiro.
+  const porPalavra = palavras.map((p) => `${SEM_ACENTO('PRO.DESCRPROD')} LIKE '%${p}%'`).join(' AND ');
+
+  // O código de barras do fabricante, quando alguém cadastrou (TGFBAR). São
+  // poucos hoje, mas é o lugar certo: cadastrar lá faz o bipe resolver de
+  // primeira, sem depender do histórico.
+  const porBarra = `PRO.CODPROD IN (SELECT BAR.CODPROD FROM TGFBAR BAR WHERE TRIM(BAR.CODBARRA) = '${texto}')`;
+
+  const filtroCodigo = ehCodigo ? `PRO.CODPROD = ${codigo} OR ${porBarra} OR` : '';
+  const ordemCodigo = ehCodigo
+    ? `CASE WHEN PRO.CODPROD = ${codigo} THEN 0 WHEN ${porBarra} THEN 1 ELSE 2 END,`
+    : '';
 
   const sql = `
     SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
     FROM TGFPRO PRO
     WHERE PRO.ATIVO = 'S'
-      AND (${filtroCodigo} UPPER(PRO.DESCRPROD) LIKE '%${texto}%')
-    ORDER BY ${ordemCodigo} PRO.CODPROD
+      AND (${filtroCodigo} (${porPalavra}))
+    ORDER BY ${ordemCodigo} LENGTH(PRO.DESCRPROD), PRO.CODPROD
     FETCH FIRST 30 ROWS ONLY
   `;
 
   const linhas = await executarQuery<LinhaProdutoBuscaSankhya>(sql);
+  return linhas.map((l) => ({
+    codigoProduto: String(l.codigoProduto),
+    descricao: l.descricao,
+    unidade: l.unidade ?? '',
+  }));
+}
+
+// O código de barras cadastrado no ERP, quando existe. É a única fonte que
+// não é palpite: quem cadastrou disse que aquele código é daquele produto.
+export async function getProdutoPorCodigoBarras(
+  codigo: string
+): Promise<ProdutoBuscaSankhya[]> {
+  const texto = sanitizarTermoBusca(codigo);
+  if (texto.length < 4) return [];
+
+  const linhas = await executarQuery<LinhaProdutoBuscaSankhya>(`
+    SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
+    FROM TGFBAR BAR
+    INNER JOIN TGFPRO PRO ON PRO.CODPROD = BAR.CODPROD
+    WHERE TRIM(BAR.CODBARRA) = '${texto}' AND PRO.ATIVO = 'S'
+    FETCH FIRST 10 ROWS ONLY
+  `);
+
   return linhas.map((l) => ({
     codigoProduto: String(l.codigoProduto),
     descricao: l.descricao,

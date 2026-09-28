@@ -5,6 +5,7 @@ import {
   buscarProdutosSankhya,
   ehLocalDeQuarentena,
   getLocaisEsperadosDoProduto,
+  getProdutoPorCodigoBarras,
   getPaiDoLocal,
   ProdutoBuscaSankhya,
   chaveCusto,
@@ -932,8 +933,24 @@ export async function resolverProdutoDoBipe(codigo: string): Promise<RespostaDoB
     });
   }
 
+  // O código de barras cadastrado no ERP (TGFBAR). É a única fonte que não é
+  // palpite: alguém cadastrou aquele código naquele produto. Hoje só 183
+  // produtos têm — cadastrar mais é o que faria o bipe resolver de primeira,
+  // sem depender do histórico.
+  const porBarra = await getProdutoPorCodigoBarras(lido);
+  if (porBarra.length > 0) {
+    for (const p of porBarra) porCodigo.delete(p.codigoProduto);
+    return {
+      produtos: [
+        ...porBarra.map((p) => ({ ...p, origem: 'CODIGO_INTERNO' as const })),
+        ...porCodigo.values(),
+      ],
+      ehEtiquetaDeLocal: false,
+    };
+  }
+
   // O código lido pode ser o próprio CODPROD (etiqueta interna do galpão).
-  // Esse caminho é certeza, não palpite, então vem primeiro na lista.
+  // Esse caminho também é certeza, então vem antes do histórico.
   if (/^[0-9]+$/.test(lido)) {
     const doSankhya = await buscarProdutosSankhya(lido);
     const exato = doSankhya.find((p) => p.codigoProduto === lido);
