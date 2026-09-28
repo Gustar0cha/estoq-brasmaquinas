@@ -27,6 +27,7 @@ export interface FiltroDashboard {
   // Recorte por tarefa: o dashboard passa a falar de um lote de trabalho
   // específico, e não de tudo que foi contado no período.
   tarefaIds?: string[];
+  projetoIds?: string[];
 }
 
 export interface EmpresaDashboard {
@@ -197,6 +198,10 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
     filtro.tarefaIds && filtro.tarefaIds.length > 0
       ? { tarefaId: { in: filtro.tarefaIds } }
       : {};
+  const dosProjetos =
+    filtro.projetoIds && filtro.projetoIds.length > 0
+      ? { tarefa: { is: { projetoId: { in: filtro.projetoIds } } } }
+      : {};
 
   const where =
     filtro.modo === 'HISTORICO'
@@ -204,6 +209,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
           ...daEmpresa,
           ...doCiclo,
           ...dasTarefas,
+          ...dosProjetos,
           status: { in: STATUS_CONTADO },
           // No histórico a data que importa é a da contagem, não a da
           // atribuição: o recorte é "o que foi contado nesse período".
@@ -212,7 +218,7 @@ export async function getDashboardContagem(filtro: FiltroDashboard): Promise<Das
             { dataConferencia2: { gte: filtro.dataInicio, lte: filtro.dataFim } },
           ],
         }
-      : { ...daEmpresa, ...doCiclo, ...dasTarefas };
+      : { ...daEmpresa, ...doCiclo, ...dasTarefas, ...dosProjetos };
 
   const itens = (await prisma.contagemItem.findMany({
     where,

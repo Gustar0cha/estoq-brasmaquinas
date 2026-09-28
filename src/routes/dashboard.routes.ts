@@ -18,6 +18,12 @@ const filtroSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v ? v.split(',').filter(Boolean) : undefined)),
+  // Projeto é apenas a pasta das tarefas; o filtro chega ao item pela tarefa
+  // para não somar contagens de outro projeto na mesma tela de TV.
+  projetoIds: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(',').filter(Boolean) : undefined)),
 });
 
 dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
