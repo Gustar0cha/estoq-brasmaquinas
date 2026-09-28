@@ -14,12 +14,15 @@ export const itemConferenciaRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 itemConferenciaRouter.get('/', autenticar, async (req, res) => {
-  const { tipo, status, atribuidoPara } = req.query;
+  const { tipo, status, atribuidoPara, tarefaId } = req.query;
 
   const itens = await itemConferenciaService.getItensAgrupados({
     tipo: typeof tipo === 'string' ? (tipo as TipoMovimentacaoSankhya) : undefined,
     status: typeof status === 'string' ? (status as StatusConferencia) : undefined,
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
+    // Recorte por tarefa: é o que deixa abrir a conferência de UM lote em vez
+    // do dia inteiro.
+    tarefaId: typeof tarefaId === 'string' && tarefaId ? tarefaId : undefined,
   });
 
   res.json(itens);
