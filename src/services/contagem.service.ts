@@ -858,6 +858,12 @@ export interface ProdutoDoBipe extends ProdutoBuscaSankhya {
   origem: 'CODIGO_INTERNO' | 'BIPE_ANTERIOR';
 }
 
+export interface RespostaDoBipe {
+  produtos: ProdutoDoBipe[];
+  // O código lido é etiqueta de prateleira, não de produto.
+  ehEtiquetaDeLocal: boolean;
+}
+
 // Descobre QUAL produto é o código que a câmera leu.
 //
 // Medido na produção: em 400 bipes gravados, só 25 (6%) eram o CODPROD do
@@ -871,14 +877,29 @@ export interface ProdutoDoBipe extends ProdutoBuscaSankhya {
 //
 // Quando o código continua desconhecido, quem responde é a pessoa: a tela cai
 // na lista do prédio. Ela escolhe, e o par fica aprendido pro próximo bipe.
-export async function resolverProdutoDoBipe(codigo: string): Promise<ProdutoDoBipe[]> {
+export async function resolverProdutoDoBipe(codigo: string): Promise<RespostaDoBipe> {
   const lido = codigo.trim();
-  if (!lido) return [];
+  if (!lido) return { produtos: [], ehEtiquetaDeLocal: false };
+
+  // Etiqueta de prateleira bipada no campo do produto acontece — dois casos
+  // já estão gravados. Como a tela agora segue sozinha quando o código
+  // resolve, um par desses mandaria a pessoa contar o item errado sem
+  // perguntar. Aqui o código é devolvido como o que ele é.
+  const ehLocal = await prisma.contagemItem.findFirst({
+    where: { localCodigo: lido },
+    select: { id: true },
+  });
+  if (ehLocal) return { produtos: [], ehEtiquetaDeLocal: true };
 
   const [porContagem, porConferencia] = await Promise.all([
     prisma.contagemItem.findMany({
       where: {
-        OR: [{ codigoProdutoBipado: lido }, { codigoProdutoBipado2: lido }],
+        // Só ensina o par quem terminou de contar: bipe abandonado no meio
+        // não confirma que aquele código era daquele produto.
+        OR: [
+          { codigoProdutoBipado: lido, quantidadeConferida: { not: null } },
+          { codigoProdutoBipado2: lido, quantidadeConferida2: { not: null } },
+        ],
       },
       select: { codigoProduto: true, descricao: true, unidade: true },
       distinct: ['codigoProduto'],
@@ -918,11 +939,14 @@ export async function resolverProdutoDoBipe(codigo: string): Promise<ProdutoDoBi
     const exato = doSankhya.find((p) => p.codigoProduto === lido);
     if (exato) {
       porCodigo.delete(exato.codigoProduto);
-      return [{ ...exato, origem: 'CODIGO_INTERNO' }, ...porCodigo.values()];
+      return {
+        produtos: [{ ...exato, origem: 'CODIGO_INTERNO' }, ...porCodigo.values()],
+        ehEtiquetaDeLocal: false,
+      };
     }
   }
 
-  return [...porCodigo.values()];
+  return { produtos: [...porCodigo.values()], ehEtiquetaDeLocal: false };
 }
 
 export interface RegistrarItemForaDoLugarInput {
