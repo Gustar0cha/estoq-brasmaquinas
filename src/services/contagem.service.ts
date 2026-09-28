@@ -1088,54 +1088,30 @@ export async function registrarItemForaDoLugar(
 // (ex: EAN-13 impresso pela TETIS/WEG/etc), que nunca vai bater com o código
 // interno do produto (CODPROD) — comparar os dois bloquearia bipes 100%
 // corretos.
-// O bipe do local vale pro PRÉDIO inteiro, não para uma prateleira só.
 //
-// Antes, cada item exigia o bipe da sua própria etiqueta: quem contava um
-// prédio de 46 itens bipava o mesmo prédio 46 vezes, subindo e descendo a
-// escada com o celular na mão. O bipe existe pra provar que a pessoa esteve
-// fisicamente naquele endereço — e uma etiqueta qualquer do mesmo prédio
-// prova exatamente isso.
+// A etiqueta é do NÍVEL, e é ela que vale. Não existe etiqueta de prédio:
+// medido na produção, nível e local são 1:1 (186 níveis, 186 códigos, nenhuma
+// ambiguidade nos dois sentidos). Quem conta está de pé num nível, e é o
+// código daquele nível que ele tem diante dos olhos.
 //
-// A validação continua existindo: o código lido tem que ser de um local que
-// esteja nesta contagem, no mesmo prédio e na mesma empresa. Bipar a etiqueta
-// da Rua 3 não libera contar a Rua 7.
+// Um bipe por nível continua cobrindo todos os itens dele — que é o que
+// evitava bipar 46 vezes o mesmo código num prédio de 46 itens (média real:
+// 8,5 itens por nível).
+//
+// Aceitar a etiqueta de um nível VIZINHO, como esta função já fez, custou
+// caro: a tela olhava o endereçamento inteiro e liberava, e aqui a busca
+// exigia que o código bipado tivesse item no mesmo ciclo — 49 dos 906 itens
+// abertos passavam na tela e falhavam na hora de contar. Dois validadores com
+// regras diferentes é sempre assim; agora só existe uma regra.
 async function conferirBipeDoLocal(
-  item: {
-    localCodigo: string;
-    local: string;
-    cicloId: string | null;
-    empresaCodigo: string;
-    rua: string | null;
-    predio: string | null;
-  },
+  item: { localCodigo: string; local: string },
   codigoLocalBipado: string
 ): Promise<void> {
-  if (codigoLocalBipado === item.localCodigo) return;
+  if (codigoLocalBipado.trim() === item.localCodigo) return;
 
-  // Item sem endereço (área solta, contagem avulsa) não tem prédio a que
-  // pertencer: aceitar "qualquer local sem rua" liberaria o galpão inteiro.
-  if (item.rua === null && item.predio === null) {
-    throw new Error(
-      `Esse local não é ${item.local} — confira a etiqueta do local antes de continuar.`
-    );
-  }
-
-  const doMesmoPredio = await prisma.contagemItem.findFirst({
-    where: {
-      cicloId: item.cicloId,
-      empresaCodigo: item.empresaCodigo,
-      localCodigo: codigoLocalBipado,
-      rua: item.rua,
-      predio: item.predio,
-    },
-    select: { id: true },
-  });
-
-  if (!doMesmoPredio) {
-    throw new Error(
-      `Essa etiqueta não é do ${rotuloDoGrupo(item.rua, item.predio)} — bipe uma etiqueta desse prédio.`
-    );
-  }
+  throw new Error(
+    `Essa etiqueta não é de ${item.local} — bipe a etiqueta desse nível antes de contar.`
+  );
 }
 
 export type ConferenciaEtiqueta =
@@ -2061,6 +2037,8 @@ export interface EncerrarPredioInput {
   empresaCodigo: string;
   rua: string | null;
   predio: string | null;
+  // Quem encerra é quem está na prateleira, e a prateleira é o nível.
+  nivel: string | null;
   modo: ModoEncerramento;
 }
 
@@ -2069,6 +2047,7 @@ export interface PredioEncerradoDTO {
   empresaCodigo: string;
   rua: string | null;
   predio: string | null;
+  nivel: string | null;
   pendentes: number;
   encerradoEm: string;
 }
@@ -2093,6 +2072,7 @@ export async function encerrarPredio(
       empresaCodigo: input.empresaCodigo,
       rua: input.rua,
       predio: input.predio,
+      nivel: input.nivel,
       status: { in: ['PENDENTE', 'EM_ANDAMENTO'] },
       quantidadeConferida: null,
       atribuidoParaId: input.usuarioId,
@@ -2118,15 +2098,21 @@ export async function encerrarPredio(
     empresaCodigo: input.empresaCodigo,
     rua: paraTexto(input.rua),
     predio: paraTexto(input.predio),
+    nivel: paraTexto(input.nivel),
   };
 
-  await prisma.predioEncerrado.upsert({
-    where: {
-      tarefaId_usuarioId_empresaCodigo_rua_predio: chave,
-    },
-    create: { ...chave, pendentes },
-    update: { pendentes, encerradoEm: new Date() },
-  });
+  // findFirst + create/update em vez de upsert: o upsert pede o nome exato do
+  // índice único, e mudar o índice (como acabou de acontecer com o nível)
+  // quebra o código que ainda está no ar até o deploy sair.
+  const existente = await prisma.predioEncerrado.findFirst({ where: chave, select: { id: true } });
+  if (existente) {
+    await prisma.predioEncerrado.update({
+      where: { id: existente.id },
+      data: { pendentes, encerradoEm: new Date() },
+    });
+  } else {
+    await prisma.predioEncerrado.create({ data: { ...chave, pendentes } });
+  }
 
   return { registradosZero, pendentes };
 }
@@ -2140,20 +2126,18 @@ export async function reabrirPredio(input: {
   empresaCodigo: string;
   rua: string | null;
   predio: string | null;
+  nivel: string | null;
 }): Promise<void> {
-  await prisma.predioEncerrado
-    .delete({
-      where: {
-        tarefaId_usuarioId_empresaCodigo_rua_predio: {
-          tarefaId: input.tarefaId,
-          usuarioId: input.usuarioId,
-          empresaCodigo: input.empresaCodigo,
-          rua: paraTexto(input.rua),
-          predio: paraTexto(input.predio),
-        },
-      },
-    })
-    .catch(() => undefined);
+  await prisma.predioEncerrado.deleteMany({
+    where: {
+      tarefaId: input.tarefaId,
+      usuarioId: input.usuarioId,
+      empresaCodigo: input.empresaCodigo,
+      rua: paraTexto(input.rua),
+      predio: paraTexto(input.predio),
+      nivel: paraTexto(input.nivel),
+    },
+  });
 }
 
 export async function getPrediosEncerrados(
@@ -2169,6 +2153,7 @@ export async function getPrediosEncerrados(
     empresaCodigo: linha.empresaCodigo,
     rua: paraNulo(linha.rua),
     predio: paraNulo(linha.predio),
+    nivel: paraNulo(linha.nivel),
     pendentes: linha.pendentes,
     encerradoEm: linha.encerradoEm.toISOString(),
   }));

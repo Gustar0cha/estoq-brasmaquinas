@@ -610,6 +610,9 @@ const predioSchema = z.object({
   empresaCodigo: z.string().min(1),
   rua: z.string().nullable().optional(),
   predio: z.string().nullable().optional(),
+  // Encerrar é por nível: é o nível que tem etiqueta e é nele que a pessoa
+  // está de pé.
+  nivel: z.string().nullable().optional(),
 });
 
 const encerrarPredioSchema = predioSchema.extend({
@@ -632,6 +635,7 @@ contagemRouter.post('/predio/encerrar', autenticar, async (req, res) => {
         empresaCodigo: parse.data.empresaCodigo,
         rua: parse.data.rua ?? null,
         predio: parse.data.predio ?? null,
+        nivel: parse.data.nivel ?? null,
         modo: parse.data.modo,
         usuarioId: req.usuario!.sub,
       })
@@ -655,6 +659,7 @@ contagemRouter.post('/predio/reabrir', autenticar, async (req, res) => {
     empresaCodigo: parse.data.empresaCodigo,
     rua: parse.data.rua ?? null,
     predio: parse.data.predio ?? null,
+    nivel: parse.data.nivel ?? null,
     usuarioId: req.usuario!.sub,
   });
   res.status(204).end();

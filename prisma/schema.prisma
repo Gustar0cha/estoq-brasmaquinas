@@ -392,6 +392,9 @@ model PredioEncerrado {
   // NULL nunca é igual a NULL — dois "sem endereço" passariam batido.
   rua    String
   predio String
+  // Quem encerra é quem está na prateleira, e a prateleira é o NÍVEL: é o
+  // nível que tem etiqueta, e é nele que a pessoa está de pé.
+  nivel  String @default("")
 
   usuario   Usuario @relation(fields: [usuarioId], references: [id])
   usuarioId String
@@ -399,7 +402,7 @@ model PredioEncerrado {
   pendentes   Int      @default(0)
   encerradoEm DateTime @default(now())
 
-  @@unique([tarefaId, usuarioId, empresaCodigo, rua, predio])
+  @@unique([tarefaId, usuarioId, empresaCodigo, rua, predio, nivel])
   @@map("predios_encerrados")
 }
 
