@@ -24,7 +24,7 @@ const tipoSchema = z.enum(['CONTAGEM', 'MOV_DIARIA']);
 // A lista vale pro painel e pro app: o operador pede só as dele passando
 // `minhas=true`, e nunca vê tarefa de outra pessoa.
 tarefaRouter.get('/', autenticar, async (req, res) => {
-  const { tipo, cicloId, status, minhas } = req.query;
+  const { tipo, cicloId, status, minhas, projetoId } = req.query;
   const filial = await filialDoRequisitante(req.usuario?.sub);
 
   const tarefas = await tarefaService.getTarefas({
@@ -33,6 +33,7 @@ tarefaRouter.get('/', autenticar, async (req, res) => {
     status: status === 'ABERTA' || status === 'FECHADA' ? status : undefined,
     atribuidaPara: minhas === 'true' ? req.usuario!.sub : undefined,
     filial,
+    projetoId: typeof projetoId === 'string' && projetoId ? projetoId : undefined,
   });
   res.json(tarefas);
 });
@@ -43,6 +44,22 @@ const criarSchema = z.object({
   responsaveisIds: z.array(z.string().min(1)).default([]),
   diaReferencia: z.string().optional(),
   observacao: z.string().trim().max(500).optional(),
+  projetoId: z.string().min(1).optional(),
+});
+
+const projetoSchema = z.object({ projetoId: z.string().min(1).nullable() });
+
+tarefaRouter.patch('/:id/projeto', autenticar, exigirAdmin, async (req, res) => {
+  const parse = projetoSchema.safeParse(req.body);
+  if (!parse.success) {
+    res.status(400).json({ erro: 'Projeto inválido.' });
+    return;
+  }
+  try {
+    res.json(await tarefaService.definirProjeto((req.params as { id: string }).id, parse.data.projetoId));
+  } catch (error) {
+    res.status(400).json({ erro: error instanceof Error ? error.message : 'Não foi possível vincular o projeto.' });
+  }
 });
 
 tarefaRouter.post('/', autenticar, exigirAdmin, async (req, res) => {

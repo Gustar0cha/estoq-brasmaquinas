@@ -29,6 +29,8 @@ export interface TarefaDTO {
   criadaEm: string;
   fechadaEm: string | null;
   observacao: string | null;
+  projetoId: string | null;
+  projetoNome: string | null;
   responsaveis: { usuarioId: string; nome: string }[];
   total: number;
   contados: number;
@@ -43,6 +45,7 @@ export interface FiltroTarefas {
   status?: 'ABERTA' | 'FECHADA';
   atribuidaPara?: string;
   filial?: string | null;
+  projetoId?: string;
 }
 
 function rotuloDoEscopo(locais: Set<string>): string {
@@ -57,11 +60,13 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
       ...(filtro?.tipo ? { tipo: filtro.tipo } : {}),
       ...(filtro?.cicloId ? { cicloId: filtro.cicloId } : {}),
       ...(filtro?.status ? { status: filtro.status } : {}),
+      ...(filtro?.projetoId ? { projetoId: filtro.projetoId } : {}),
       ...(filtro?.atribuidaPara
         ? { responsaveis: { some: { usuarioId: filtro.atribuidaPara } } }
         : {}),
     },
     include: {
+      projeto: { select: { id: true, nome: true } },
       responsaveis: { include: { usuario: { select: { id: true, nome: true } } } },
       contagemItens: { select: { status: true, rua: true, predio: true, localCodigo: true } },
       itemResultados: { select: { diferenca: true, localCodigo: true, local: true } },
@@ -106,6 +111,8 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
         criadaEm: t.criadaEm.toISOString(),
         fechadaEm: t.fechadaEm?.toISOString() ?? null,
         observacao: t.observacao,
+        projetoId: t.projetoId,
+        projetoNome: t.projeto?.nome ?? null,
         responsaveis: t.responsaveis.map((r) => ({ usuarioId: r.usuario.id, nome: r.usuario.nome })),
         total,
         contados,
@@ -129,6 +136,7 @@ export interface CriarTarefaInput {
   criadaPorId: string;
   diaReferencia?: Date;
   observacao?: string;
+  projetoId?: string;
 }
 
 export async function criarTarefa(input: CriarTarefaInput): Promise<TarefaDTO> {
@@ -148,6 +156,7 @@ export async function criarTarefa(input: CriarTarefaInput): Promise<TarefaDTO> {
       diaReferencia: input.tipo === 'MOV_DIARIA' ? (input.diaReferencia ?? new Date()) : null,
       criadaPorId: input.criadaPorId,
       observacao: input.observacao?.trim() || null,
+      ...(input.projetoId ? { projetoId: input.projetoId } : {}),
       responsaveis: {
         create: [...new Set(input.responsaveisIds)].map((usuarioId) => ({ usuarioId })),
       },
@@ -157,6 +166,17 @@ export async function criarTarefa(input: CriarTarefaInput): Promise<TarefaDTO> {
   const dto = await getTarefa(tarefa.id);
   if (!dto) throw new Error('Falha ao recarregar a tarefa recém-criada.');
   return dto;
+}
+
+export async function definirProjeto(id: string, projetoId: string | null): Promise<TarefaDTO> {
+  if (projetoId) {
+    const projeto = await prisma.projeto.findUnique({ where: { id: projetoId }, select: { id: true } });
+    if (!projeto) throw new Error('Projeto não encontrado.');
+  }
+  await prisma.tarefa.update({ where: { id }, data: { projetoId } });
+  const tarefa = await getTarefa(id);
+  if (!tarefa) throw new Error('Tarefa não encontrada.');
+  return tarefa;
 }
 
 export async function definirResponsaveis(

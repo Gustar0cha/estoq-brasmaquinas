@@ -331,6 +331,11 @@ model Tarefa {
   fechadaEm   DateTime?
   observacao  String?
 
+  // Projeto é somente uma identificação organizacional. Ele agrupa tarefas
+  // sem mudar a identidade dos itens nem misturar CONTAGEM e MOV_DIARIA.
+  projeto   Projeto? @relation(fields: [projetoId], references: [id], onDelete: SetNull)
+  projetoId String?
+
   responsaveis      TarefaResponsavel[]
   contagemItens     ContagemItem[]
   itemAtribuicoes   ItemAtribuicao[]
@@ -339,6 +344,18 @@ model Tarefa {
   tratamentos       TratamentoMovDiaria[]
 
   @@map("tarefas")
+  @@index([projetoId])
+}
+
+// Um projeto é a pasta lógica do gestor (ex.: "Inventário Setembro"). Não é
+// uma etapa de execução: as regras, responsáveis e dados continuam na tarefa.
+model Projeto {
+  id        String   @id @default(uuid())
+  nome      String
+  criadoEm  DateTime @default(now())
+  tarefas   Tarefa[]
+
+  @@map("projetos")
 }
 
 // O que o gestor apurou num item de Mov. Diária depois que o colaborador
