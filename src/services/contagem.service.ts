@@ -336,18 +336,10 @@ async function acharOuCriarTarefa(
   responsaveisIds: string[],
   tarefaExistenteId?: string
 ): Promise<string> {
-  const existente = tarefaExistenteId
-    ? await prisma.tarefa.findUnique({ where: { id: tarefaExistenteId } })
-    : await prisma.tarefa.findFirst({
-        where: { nome, tipo: 'CONTAGEM', cicloId, status: 'ABERTA' },
-      });
-
-  if (tarefaExistenteId && !existente) {
-    throw new Error('Essa tarefa não existe mais.');
-  }
+  const existenteId = await acharTarefaAlvo(nome, cicloId, tarefaExistenteId);
 
   const tarefaId =
-    existente?.id ??
+    existenteId ??
     (
       await prisma.tarefa.create({
         data: { nome, tipo: 'CONTAGEM', cicloId, criadaPorId },
@@ -472,17 +464,21 @@ export async function atribuirContagemPredio(
     throw new Error('Nenhum item com saldo bate com esse filtro.');
   }
 
-  const novos = await somenteForaDeContagemAberta(filtrados, input.empresaCodigo);
-
-  if (novos.length === 0) {
-    return { criados: 0 };
-  }
-
   const ciclo = await garantirCicloAberto(input.atribuidoPorId);
   const rotuloTarefa =
     input.tarefaNome?.trim() ||
     rotuloDoGrupo(input.rua, input.predio) +
       (input.nivel !== undefined ? ` · ${rotuloDaSubdivisao(input.nivel)}` : '');
+
+  // A tarefa de destino é resolvida antes: a duplicata que importa é a de
+  // dentro dela.
+  const alvo = await acharTarefaAlvo(rotuloTarefa, ciclo.id, input.tarefaId);
+  const novos = await foraDestaTarefa(filtrados, input.empresaCodigo, alvo);
+
+  if (novos.length === 0) {
+    return { criados: 0 };
+  }
+
   const tarefaId = await acharOuCriarTarefa(
     rotuloTarefa,
     ciclo.id,
@@ -663,18 +659,50 @@ function filtrarPorMarcaEGrupo<T extends { marca: string | null; grupoCodigo: st
   );
 }
 
-// Atribuir é idempotente: produto+local que já está numa contagem aberta não
-// entra de novo, senão o mesmo item apareceria duas vezes pra contar.
-async function somenteForaDeContagemAberta<T extends { codigoProduto: string; localCodigo: string }>(
+// Atribuir é idempotente DENTRO DA TAREFA: o mesmo produto+local não entra
+// duas vezes na mesma tarefa, senão a pessoa veria o item repetido na lista.
+//
+// Entre tarefas diferentes, entra. A trava antiga valia pro galpão inteiro —
+// produto+local aberto em qualquer contagem não entrava em mais nenhuma — e
+// era ela que respondia "esses itens já estão em alguma contagem aberta" e
+// deixava as linhas apagadas na tela de atribuir.
+//
+// Isso contradizia o modelo: tarefa é justamente o recorte que separa
+// trabalhos distintos sobre o mesmo item, e desde que a tarefa entrou na chave
+// do resultado um não sobrescreve o outro. Uma tarefa esquecida em aberto não
+// pode sequestrar o endereço para sempre.
+async function foraDestaTarefa<T extends { codigoProduto: string; localCodigo: string }>(
   itens: T[],
-  empresaCodigo: string
+  empresaCodigo: string,
+  tarefaId: string | null
 ): Promise<T[]> {
+  if (!tarefaId) return itens;
+
   const existentes = await prisma.contagemItem.findMany({
-    where: { empresaCodigo, status: { in: STATUS_ABERTOS } },
+    where: { empresaCodigo, tarefaId, status: { in: STATUS_ABERTOS } },
     select: { codigoProduto: true, localCodigo: true },
   });
   const abertos = new Set(existentes.map((e) => `${e.codigoProduto}|${e.localCodigo}`));
   return itens.filter((i) => !abertos.has(`${i.codigoProduto}|${i.localCodigo}`));
+}
+
+// Qual tarefa vai receber os itens, sem criá-la: é preciso saber disso ANTES
+// de filtrar duplicata, e criar aqui deixaria tarefa vazia para trás quando
+// nada entra.
+async function acharTarefaAlvo(
+  nome: string,
+  cicloId: string,
+  tarefaExistenteId?: string
+): Promise<string | null> {
+  if (tarefaExistenteId) {
+    const existente = await prisma.tarefa.findUnique({ where: { id: tarefaExistenteId } });
+    if (!existente) throw new Error('Essa tarefa não existe mais.');
+    return existente.id;
+  }
+  const porNome = await prisma.tarefa.findFirst({
+    where: { nome, tipo: 'CONTAGEM', cicloId, status: 'ABERTA' },
+  });
+  return porNome?.id ?? null;
 }
 
 export interface AlvoAtribuicaoPredio {
@@ -1066,7 +1094,9 @@ export async function registrarItemForaDoLugar(
       atribuidoPorId: input.usuarioId,
       iniciadoPorId: input.usuarioId,
       iniciadoEm: new Date(),
-      codigoProdutoBipado: input.codigoProdutoBipado,
+      // Vazio vira null: item sem código de barras não deve poluir o
+      // dicionário de bipes nem os relatórios com string vazia.
+      codigoProdutoBipado: input.codigoProdutoBipado || null,
       codigoLocalBipado: input.codigoLocalBipado,
     },
   });
@@ -1263,7 +1293,9 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
       status: 'EM_ANDAMENTO',
       iniciadoPorId: input.usuarioId,
       iniciadoEm: new Date(),
-      codigoProdutoBipado: input.codigoProdutoBipado,
+      // Vazio vira null: item sem código de barras não deve poluir o
+      // dicionário de bipes nem os relatórios com string vazia.
+      codigoProdutoBipado: input.codigoProdutoBipado || null,
       codigoLocalBipado: input.codigoLocalBipado,
     },
   });
@@ -1308,7 +1340,7 @@ export async function iniciarSegundaContagemItem(
     data: {
       status: 'SEGUNDA_EM_ANDAMENTO',
       segundaContagemIniciadaEm: new Date(),
-      codigoProdutoBipado2: codigoProdutoBipado,
+      codigoProdutoBipado2: codigoProdutoBipado || null,
       codigoLocalBipado2: codigoLocalBipado,
     },
   });
@@ -1988,7 +2020,17 @@ export async function atribuirContagemItens(
     await exigirFilialCompativel(input.atribuidoParaId, filial);
   }
 
-  const novos = await somenteForaDeContagemAberta(escolhidos, input.empresaCodigo);
+  const ciclo = await garantirCicloAberto(input.atribuidoPorId);
+  const rotuloTarefa = input.tarefaNome?.trim() || `Itens avulsos · ${new Date().toLocaleDateString('pt-BR')}`;
+  const responsaveis =
+    input.atribuidoParaIds && input.atribuidoParaIds.length > 0
+      ? [...new Set(input.atribuidoParaIds)]
+      : [input.atribuidoParaId];
+
+  // A tarefa de destino é resolvida antes: a duplicata que importa é a de
+  // dentro dela.
+  const alvo = await acharTarefaAlvo(rotuloTarefa, ciclo.id, input.tarefaId);
+  const novos = await foraDestaTarefa(escolhidos, input.empresaCodigo, alvo);
   if (novos.length === 0) return { criados: 0 };
 
   const paisPorLocal = new Map<string, Awaited<ReturnType<typeof getPaiDoLocal>>>();
@@ -1996,12 +2038,6 @@ export async function atribuirContagemItens(
     paisPorLocal.set(localCodigo, await getPaiDoLocal(localCodigo));
   }
 
-  const ciclo = await garantirCicloAberto(input.atribuidoPorId);
-  const rotuloTarefa = input.tarefaNome?.trim() || `Itens avulsos · ${new Date().toLocaleDateString('pt-BR')}`;
-  const responsaveis =
-    input.atribuidoParaIds && input.atribuidoParaIds.length > 0
-      ? [...new Set(input.atribuidoParaIds)]
-      : [input.atribuidoParaId];
   const tarefaId = await acharOuCriarTarefa(
     rotuloTarefa,
     ciclo.id,

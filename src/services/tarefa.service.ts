@@ -69,7 +69,10 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
       projeto: { select: { id: true, nome: true } },
       responsaveis: { include: { usuario: { select: { id: true, nome: true } } } },
       contagemItens: { select: { status: true, rua: true, predio: true, localCodigo: true } },
-      itemResultados: { select: { diferenca: true, localCodigo: true, local: true } },
+      itemResultados: { select: { diferenca: true, localCodigo: true, local: true, chave: true } },
+      // A Mov. Diária mede pelo que foi DISTRIBUÍDO, não pelo que já voltou
+      // contado — ver o cálculo de `total` abaixo.
+      itemAtribuicoes: { select: { chave: true, localCodigo: true } },
     },
     orderBy: { criadaEm: 'desc' },
   });
@@ -84,6 +87,9 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
       const conferencias = prefixo
         ? t.itemResultados.filter((r) => r.localCodigo.startsWith(prefixo))
         : t.itemResultados;
+      const distribuidos = prefixo
+        ? t.itemAtribuicoes.filter((a) => a.localCodigo.startsWith(prefixo))
+        : t.itemAtribuicoes;
 
       const locais = new Set<string>();
       itens.forEach((i) => {
@@ -92,10 +98,26 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
       conferencias.forEach((c) => locais.add(c.local));
 
       const ehContagem = t.tipo === 'CONTAGEM';
-      const total = ehContagem ? itens.length : conferencias.length;
+
+      // Na Mov. Diária o total é o que foi DISTRIBUÍDO, não o que já voltou
+      // contado.
+      //
+      // Contar pelos resultados dizia "0 de 0" numa tarefa recém-distribuída —
+      // e, pior, o filtro por loja lá embaixo derruba tarefa com total 0, então
+      // ela sumia da lista de quem ia fazê-la. Foi assim que "teste gustavo",
+      // com 1 item distribuído pro Rone, nunca chegou nele.
+      //
+      // A união cobre o resultado que chegou sem atribuição (contagem avulsa
+      // de um item que ninguém distribuiu).
+      const chavesDaMov = new Set([
+        ...distribuidos.map((a) => a.chave),
+        ...conferencias.map((c) => c.chave),
+      ]);
+
+      const total = ehContagem ? itens.length : chavesDaMov.size;
       const contados = ehContagem
         ? itens.filter((i) => !ABERTOS_CONTAGEM.includes(i.status)).length
-        : conferencias.length;
+        : new Set(conferencias.map((c) => c.chave)).size;
       const divergentes = ehContagem
         ? itens.filter((i) => i.status === 'DIVERGENCIA' || i.status === 'DIVERGENCIA_LOCAL').length
         : conferencias.filter((c) => c.diferenca !== 0).length;
@@ -117,7 +139,15 @@ export async function getTarefas(filtro?: FiltroTarefas): Promise<TarefaDTO[]> {
         total,
         contados,
         divergentes,
-        escopo: rotuloDoEscopo(locais),
+        // Atribuição guarda o código do local, não o nome dele: numa Mov.
+        // Diária ainda sem contagem, o que dá pra dizer é quantos endereços.
+        escopo:
+          locais.size > 0
+            ? rotuloDoEscopo(locais)
+            : (() => {
+                const quantos = new Set(distribuidos.map((a) => a.localCodigo)).size;
+                return quantos > 0 ? `${quantos} endereço${quantos === 1 ? '' : 's'}` : '—';
+              })(),
       };
     })
     // Quem é de uma loja não enxerga a tarefa que só tem endereço de outra.

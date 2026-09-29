@@ -272,7 +272,8 @@ contagemItensRouter.get('/divergencias', autenticar, exigirAdmin, async (req, re
 
 const itemForaDoLugarSchema = z.object({
   codigoProduto: z.string().min(1),
-  codigoProdutoBipado: z.string().min(1),
+  // Opcional pelo mesmo motivo do iniciar: item sem código de barras existe.
+  codigoProdutoBipado: z.string().default(''),
   codigoLocalBipado: z.string().min(1),
 });
 
@@ -300,7 +301,15 @@ contagemItensRouter.post('/fora-do-lugar', autenticar, async (req, res) => {
 });
 
 const iniciarContagemItemSchema = z.object({
-  codigoProdutoBipado: z.string().min(1),
+  // O bipe do PRODUTO é opcional: ele sempre foi evidência, nunca validação
+  // (o Sankhya não tem código de barras cadastrado), e metade do estoque não
+  // tem código nenhum pra bipar — conexão de ferro fundido solta não carrega
+  // etiqueta. Medido: em Rua 8 Prédio 1, só 3 dos 45 produtos resolvem no
+  // bipe. Exigi-lo travava a contagem desses itens.
+  //
+  // O bipe do LOCAL continua obrigatório: é ele que prova que a pessoa esteve
+  // no endereço, e é ele que o servidor confere.
+  codigoProdutoBipado: z.string().default(''),
   codigoLocalBipado: z.string().min(1),
 });
 
