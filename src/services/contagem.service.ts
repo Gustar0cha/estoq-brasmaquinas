@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { ehLocalPaiAgrupador } from '../lib/agrupadores';
+import { validarFotoContagem } from '../lib/fotoContagem';
 import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
@@ -139,6 +141,7 @@ export interface FiltroContagemItens {
   atribuidoPara?: string;
   dataInicio?: Date;
   dataFim?: Date;
+  concluida?: boolean;
   // Inventário. Ausente = todos.
   cicloId?: string;
   // Recorte por tarefa — é o que separa o inventário da movimentação diária
@@ -1399,9 +1402,10 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
       ...(ehFilial(filtro?.filial)
         ? { localCodigo: { startsWith: prefixoDaFilial(filtro.filial) } }
         : {}),
+      ...(filtro?.concluida ? { quantidadeConferida: { not: null } } : {}),
       ...(filtro?.dataInicio || filtro?.dataFim
         ? {
-            iniciadoEm: {
+            [filtro?.concluida ? 'dataConferencia' : 'iniciadoEm']: {
               ...(filtro?.dataInicio ? { gte: filtro.dataInicio } : {}),
               ...(filtro?.dataFim ? { lte: filtro.dataFim } : {}),
             },
@@ -2407,6 +2411,7 @@ export interface ContagemAvulsaInput {
   codigoProdutoBipado?: string;
   motivo?: string;
   observacao?: string;
+  foto?: { buffer: Buffer; mimeType: string };
 }
 
 // Contagem avulsa: produto e quantidade, sem endereço nenhum.
@@ -2424,8 +2429,13 @@ export async function registrarContagemAvulsa(
 ): Promise<{ item: ContagemItemDTO; esperado: number; locais: number }> {
   const usuario = await prisma.usuario.findUnique({ where: { id: input.usuarioId } });
   if (!usuario) throw new Error('Usuário não encontrado.');
+  if (!usuario.ativo) throw new Error('Usuário não autorizado.');
   if (!Number.isFinite(input.quantidadeConferida) || input.quantidadeConferida < 0) {
     throw new Error('Informe a quantidade contada.');
+  }
+  validarFotoContagem(input.foto);
+  if (input.codigoLocalBipado?.trim() && !localVisivelPara(input.codigoLocalBipado.trim(), usuario.filial)) {
+    throw new Error(`O local bipado não pertence à loja ${labelFilial(usuario.filial)}.`);
   }
 
   const prefixo = ehFilial(usuario.filial) ? prefixoDaFilial(usuario.filial) : undefined;
@@ -2447,6 +2457,10 @@ export async function registrarContagemAvulsa(
   const rotuloTarefa = input.tarefaNome?.trim() || `Avulsa · ${new Date().toLocaleDateString('pt-BR')}`;
   const tarefaId = await acharOuCriarTarefa(rotuloTarefa, ciclo.id, input.usuarioId, [input.usuarioId]);
   const agora = new Date();
+
+  const fotoChaveArmazenamento = input.foto
+    ? await uploadFotoContagem(`avulsa-${input.usuarioId}-${randomUUID()}`, 1, input.foto.buffer, input.foto.mimeType)
+    : null;
 
   const criado = await prisma.contagemItem.create({
     data: {
@@ -2480,6 +2494,7 @@ export async function registrarContagemAvulsa(
       codigoProdutoBipado: input.codigoProdutoBipado ?? null,
       conferidoPorId: input.usuarioId,
       dataConferencia: agora,
+      fotoChaveArmazenamento,
     },
   });
 

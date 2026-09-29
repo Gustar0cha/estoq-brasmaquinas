@@ -21,6 +21,7 @@ import { projetoRouter } from './routes/projeto.routes';
 import { relatoriosRouter } from './routes/relatorios.routes';
 import { tarefaRouter } from './routes/tarefa.routes';
 import { usuariosRouter } from './routes/usuarios.routes';
+import { CAPACIDADES_FLUXO_LIVRE } from './services/operacaoLivre.service';
 
 export const app = express();
 
@@ -53,7 +54,7 @@ app.use('/painel', express.static(PASTA_PAINEL));
 // rota porque o Express 5 mudou a sintaxe de wildcard.
 app.use('/painel', (_req, res) => res.sendFile(path.join(PASTA_PAINEL, 'index.html')));
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, fluxoLivre: CAPACIDADES_FLUXO_LIVRE }));
 
 app.use('/auth', authRouter);
 app.use('/usuarios', usuariosRouter);

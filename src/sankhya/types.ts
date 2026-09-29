@@ -31,4 +31,5 @@ export interface MovimentacaoSankhya {
 
 export interface FiltroMovimentacoesSankhya {
   tipo?: TipoMovimentacaoSankhya;
+  diaReferencia?: import('../lib/datas').DiaReferencia;
 }

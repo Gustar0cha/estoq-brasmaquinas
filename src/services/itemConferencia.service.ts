@@ -6,6 +6,7 @@ import { StatusConferencia } from './movimentacoes.service';
 import { bipeIdentificaProduto } from './contagem.service';
 import { criarNotificacao } from './notificacao.service';
 import { parsearLocalizacao } from '../sankhya/localizacao';
+import { DiaReferencia } from '../lib/datas';
 
 export interface NotaOrigemDTO {
   movimentacaoId: string;
@@ -133,8 +134,8 @@ interface GrupoAcumulado {
 // Junta os itens de todas as notas do período num mapa por produto+local —
 // o mesmo produto no mesmo local, vindo de notas diferentes, vira uma única
 // linha (quantidadeEsperada já é compartilhada entre elas, ver client.ts).
-async function agruparPorProdutoLocal(filtro?: { tipo?: TipoMovimentacaoSankhya }): Promise<Map<string, GrupoAcumulado>> {
-  const movimentacoes = await getMovimentacoesSankhya({ tipo: filtro?.tipo });
+export async function agruparPorProdutoLocal(filtro?: { tipo?: TipoMovimentacaoSankhya; diaReferencia?: DiaReferencia }): Promise<Map<string, GrupoAcumulado>> {
+  const movimentacoes = await getMovimentacoesSankhya(filtro);
   const grupos = new Map<string, GrupoAcumulado>();
 
   for (const mov of movimentacoes) {
@@ -195,7 +196,7 @@ export function calcularStatus(
 // a conferência feita na tarefa de ontem vinha colada no item da tarefa de
 // hoje — o mesmo produto, dois trabalhos diferentes, um contaminando o outro.
 // Com a tarefa em mãos, só o que nasceu nela conta.
-async function montarDTOs(
+export async function montarDTOs(
   grupos: Map<string, GrupoAcumulado>,
   tarefaId?: string
 ): Promise<ItemAgrupadoDTO[]> {

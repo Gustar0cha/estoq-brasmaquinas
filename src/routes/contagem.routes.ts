@@ -7,6 +7,7 @@ import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as contagemService from '../services/contagem.service';
 import { getPanoramaEstoque } from '../services/panorama.service';
 import { StatusContagemItem } from '../services/contagem.service';
+import { CAPACIDADES_FLUXO_LIVRE } from '../services/operacaoLivre.service';
 
 
 // Guarda a foto em memória (nunca em disco no servidor) e repassa direto
@@ -15,6 +16,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 
 export const contagemRouter = Router();
 export const contagemItensRouter = Router();
+
+contagemRouter.get('/capacidades', autenticar, (_req, res) => res.json(CAPACIDADES_FLUXO_LIVRE));
 
 // A loja de quem está pedindo decide o que ele enxerga (os locais das outras
 // lojas somem da interface). Vem do banco, não do token: o token antigo dos
@@ -240,19 +243,26 @@ contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, 
 // ---- Itens de contagem (/contagem-itens) -------------------------------
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
-  const { status, atribuidoPara, dataInicio, dataFim, semContagemFechada } = req.query;
+  const { status, atribuidoPara, dataInicio, dataFim, semContagemFechada, concluida } = req.query;
+  const inicio = typeof dataInicio === 'string' ? new Date(dataInicio) : undefined;
+  const fim = typeof dataFim === 'string' ? new Date(dataFim) : undefined;
+  if ((inicio && Number.isNaN(inicio.getTime())) || (fim && Number.isNaN(fim.getTime()))) {
+    res.status(400).json({ erro: 'Período inválido.' });
+    return;
+  }
 
   const { tarefaIds } = req.query;
   const itens = await contagemService.getContagemItens({
     semContagemFechada: semContagemFechada === 'true',
+    concluida: concluida === 'true',
     tarefaIds:
       typeof tarefaIds === 'string' && tarefaIds
         ? tarefaIds.split(',').filter(Boolean)
         : undefined,
     status: typeof status === 'string' ? (status as StatusContagemItem) : undefined,
     atribuidoPara: typeof atribuidoPara === 'string' ? atribuidoPara : undefined,
-    dataInicio: typeof dataInicio === 'string' ? new Date(dataInicio) : undefined,
-    dataFim: typeof dataFim === 'string' ? new Date(dataFim) : undefined,
+    dataInicio: inicio,
+    dataFim: fim,
     filial: await filialDoRequisitante(req.usuario?.sub),
   });
   res.json(itens);
@@ -631,7 +641,7 @@ const avulsaSchema = z.object({
 
 // Contagem avulsa: produto e quantidade, sem endereço. A conferência é
 // contra o saldo do produto somado nos locais da loja de quem conta.
-contagemRouter.post('/avulsa', autenticar, async (req, res) => {
+contagemRouter.post('/avulsa', autenticar, upload.single('foto'), async (req, res) => {
   const parse = avulsaSchema.safeParse(req.body);
   if (!parse.success) {
     res.status(400).json({ erro: 'Informe o produto e a quantidade contada.' });
@@ -642,8 +652,10 @@ contagemRouter.post('/avulsa', autenticar, async (req, res) => {
     const resultado = await contagemService.registrarContagemAvulsa({
       ...parse.data,
       usuarioId: req.usuario!.sub,
+      foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
     });
-    res.status(201).json(resultado);
+    // Contagem cega: não devolver saldo ou divergência ao colaborador.
+    res.status(201).json({ ok: true, itemId: resultado.item.id });
   } catch (error) {
     res
       .status(400)

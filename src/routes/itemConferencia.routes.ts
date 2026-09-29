@@ -6,6 +6,7 @@ import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as itemConferenciaService from '../services/itemConferencia.service';
 import { StatusConferencia } from '../services/movimentacoes.service';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
+import { enviarMovimentacaoLivre, getMovimentacaoLivreHoje, getResultadosMovimentacao } from '../services/operacaoLivre.service';
 
 export const itemConferenciaRouter = Router();
 
@@ -26,6 +27,22 @@ itemConferenciaRouter.get('/', autenticar, async (req, res) => {
   });
 
   res.json(itens);
+});
+
+// Rotas estáticas antes de /:chave. A lista do operador é deliberadamente
+// cega: não inclui saldo, diferenças nem resultados de outras pessoas.
+itemConferenciaRouter.get('/hoje', autenticar, async (req, res) => {
+  res.json(await getMovimentacaoLivreHoje(req.usuario!.sub));
+});
+
+itemConferenciaRouter.get('/resultados', autenticar, exigirAdmin, async (req, res) => {
+  const dataInicio = typeof req.query.dataInicio === 'string' ? new Date(req.query.dataInicio) : undefined;
+  const dataFim = typeof req.query.dataFim === 'string' ? new Date(req.query.dataFim) : undefined;
+  if ((dataInicio && Number.isNaN(dataInicio.getTime())) || (dataFim && Number.isNaN(dataFim.getTime()))) {
+    res.status(400).json({ erro: 'Período inválido.' });
+    return;
+  }
+  res.json(await getResultadosMovimentacao({ dataInicio, dataFim, usuarioId: req.usuario!.sub }));
 });
 
 // Precisam vir antes de "/:chave" para não serem confundidas com uma chave literal.
@@ -78,7 +95,7 @@ itemConferenciaRouter.post(
     }
 
     try {
-      const item = await itemConferenciaService.enviarConferenciaItem({
+      const dados = {
         chave,
         tarefaId: parse.data.tarefaId,
         conferidoPorId: req.usuario!.sub,
@@ -88,7 +105,10 @@ itemConferenciaRouter.post(
         codigoLocalBipado: parse.data.codigoLocalBipado,
         codigoProdutoBipado: parse.data.codigoProdutoBipado,
         foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
-      });
+      };
+      const item = parse.data.tarefaId?.startsWith('mov-diaria-livre:')
+        ? await enviarMovimentacaoLivre(dados)
+        : await itemConferenciaService.enviarConferenciaItem(dados);
       res.json({ ok: true, item });
     } catch (error) {
       res

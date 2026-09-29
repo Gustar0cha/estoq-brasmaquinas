@@ -81,6 +81,11 @@ function formatarDiaReferenciaOracle(diaRef: DiaReferencia): string {
   return `TO_DATE('${formatarDiaReferencia(diaRef)}', 'YYYY-MM-DD')`;
 }
 
+function proximoDia(diaRef: DiaReferencia): DiaReferencia {
+  const dia = new Date(Date.UTC(diaRef.ano, diaRef.mes - 1, diaRef.dia + 1));
+  return { ano: dia.getUTCFullYear(), mes: dia.getUTCMonth() + 1, dia: dia.getUTCDate() };
+}
+
 function montarSelectBase(): string {
   return `
     SELECT
@@ -213,7 +218,10 @@ export async function getMovimentacoesSankhya(
     WHERE
       CAB.STATUSNOTA = 'L'
       AND (TOP.ATUALEST IN ('B', 'E') OR CAB.CODTIPOPER = 800)
-      AND TRUNC(CAB.DTNEG) BETWEEN ${formatarDataOracle(dataInicio)} AND ${formatarDataOracle(dataFim)}
+      AND ${filtro?.diaReferencia
+        ? `CAB.DTNEG >= ${formatarDiaReferenciaOracle(filtro.diaReferencia)}
+           AND CAB.DTNEG < ${formatarDiaReferenciaOracle(proximoDia(filtro.diaReferencia))}`
+        : `TRUNC(CAB.DTNEG) BETWEEN ${formatarDataOracle(dataInicio)} AND ${formatarDataOracle(dataFim)}`}
       ${FILTROS_COMUNS}
     ${GROUP_BY}
     ORDER BY CAB.DTNEG DESC, CAB.NUNOTA DESC
