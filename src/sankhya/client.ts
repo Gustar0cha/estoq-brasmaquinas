@@ -1254,15 +1254,39 @@ interface LinhaProdutoBuscaSankhya {
   unidade: string | null;
 }
 
+interface LinhaProdutoBarrasSankhya extends LinhaProdutoBuscaSankhya {
+  unidadeDoCodigo: string | null;
+  fator: number | null;
+  operacao: string | null;
+}
+
 export interface ProdutoBuscaSankhya {
   codigoProduto: string;
   descricao: string;
   unidade: string;
+  // Preenchido só quando o produto foi achado por um código de barras de
+  // unidade ALTERNATIVA (caixa, pacote, rolo). Ver getProdutoPorCodigoBarras.
+  unidadeDoCodigo?: UnidadeDoCodigo | null;
+}
+
+// A unidade a que o código bipado se refere, quando não é a unidade de
+// contagem. "1 PT = 100 UN" é a diferença entre contar 3 e contar 300.
+export interface UnidadeDoCodigo {
+  unidade: string;
+  // Quantas unidades-base cabem em uma dessa. Já resolve o multiplica/divide
+  // do Sankhya, então é sempre "1 <unidade> = <equivale> <base>".
+  equivale: number;
 }
 
 // O gateway DbExplorerSP não aceita bind parameters (só string de SQL), então
 // todo texto vindo do app precisa ser higienizado à mão antes de entrar na
 // query — aqui só sobra o que pode aparecer numa descrição de produto.
+//
+// ARMADILHA DO GATEWAY: o SQL viaja dentro de XML, e `<>` quebra a consulta em
+// SILÊNCIO — ela volta com zero linhas em vez de erro. Foi assim que eu
+// concluí, errado, que o Sankhya não tinha código de barras cadastrado: o
+// `COUNT(*) ... WHERE TRIM(CODBARRA) <> ''` respondia 0 enquanto a busca
+// direta pelo mesmo código achava o produto. Use `IS NOT NULL` ou `!=`.
 function sanitizarTermoBusca(termo: string): string {
   return termo
     .toUpperCase()
@@ -1313,7 +1337,9 @@ export async function buscarProdutosSankhya(termo: string): Promise<ProdutoBusca
   // O código de barras do fabricante, quando alguém cadastrou (TGFBAR). São
   // poucos hoje, mas é o lugar certo: cadastrar lá faz o bipe resolver de
   // primeira, sem depender do histórico.
-  const porBarra = `PRO.CODPROD IN (SELECT BAR.CODPROD FROM TGFBAR BAR WHERE TRIM(BAR.CODBARRA) = '${texto}')`;
+  const porBarra =
+    `(PRO.CODPROD IN (SELECT VOA.CODPROD FROM TGFVOA VOA WHERE TRIM(VOA.CODBARRA) = '${texto}')` +
+    ` OR PRO.CODPROD IN (SELECT BAR.CODPROD FROM TGFBAR BAR WHERE TRIM(BAR.CODBARRA) = '${texto}'))`;
 
   const filtroCodigo = ehCodigo ? `PRO.CODPROD = ${codigo} OR ${porBarra} OR` : '';
   const ordemCodigo = ehCodigo
@@ -1345,25 +1371,62 @@ export async function getProdutoPorCodigoBarras(
   const texto = sanitizarTermoBusca(codigo);
   if (texto.length < 4) return [];
 
-  const linhas = await executarQuery<LinhaProdutoBuscaSankhya>(`
-    SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao", PRO.CODVOL AS "unidade"
-    FROM TGFBAR BAR
-    INNER JOIN TGFPRO PRO ON PRO.CODPROD = BAR.CODPROD
-    WHERE TRIM(BAR.CODBARRA) = '${texto}' AND PRO.ATIVO = 'S'
+  // TGFVOA é a tabela das "Unidades Alternativas" do produto — é ALI que o
+  // código de barras fica cadastrado neste Sankhya, não em TGFBAR.
+  //
+  // Eu procurei no lugar errado por muito tempo: TGFBAR tem 185 linhas e
+  // nenhum dos códigos que o galpão bipa. TGFVOA tem 16.743 códigos para
+  // 16.297 produtos, e cobre 96% dos itens abertos. TGFBAR fica como segunda
+  // fonte porque continua sendo um lugar válido de cadastro.
+  //
+  // Um produto pode ter VÁRIOS códigos — um por unidade de medida. O produto
+  // 71103953 tem dez (BD, CE, CH, CT, CX, DT, JG, LA, MT, PT). Todos acham o
+  // mesmo produto, porque o casamento é pelo código e não pela unidade.
+  //
+  // E é por isso que a unidade viaja junto: 393 códigos são de unidade que não
+  // é 1:1 com a base (PT ×100, CX ×12, KM ×1000). Bipar o código do pacote e
+  // digitar "3" seriam 300 peças, não 3 — e sem avisar ninguém.
+  const linhas = await executarQuery<LinhaProdutoBarrasSankhya>(`
+    SELECT PRO.CODPROD AS "codigoProduto", PRO.DESCRPROD AS "descricao",
+           PRO.CODVOL AS "unidade", VOA.CODVOL AS "unidadeDoCodigo",
+           VOA.QUANTIDADE AS "fator", VOA.DIVIDEMULTIPLICA AS "operacao"
+    FROM TGFPRO PRO
+    LEFT JOIN TGFVOA VOA ON VOA.CODPROD = PRO.CODPROD AND TRIM(VOA.CODBARRA) = '${texto}'
+    WHERE PRO.ATIVO = 'S'
+      AND (
+        PRO.CODPROD IN (SELECT V2.CODPROD FROM TGFVOA V2 WHERE TRIM(V2.CODBARRA) = '${texto}')
+        OR PRO.CODPROD IN (SELECT BAR.CODPROD FROM TGFBAR BAR WHERE TRIM(BAR.CODBARRA) = '${texto}')
+      )
     FETCH FIRST 10 ROWS ONLY
   `);
 
-  return linhas.map((l) => ({
-    codigoProduto: String(l.codigoProduto),
-    descricao: l.descricao,
-    unidade: l.unidade ?? '',
-  }));
+  return linhas.map((l) => {
+    const base = l.unidade ?? '';
+    const alternativa = l.unidadeDoCodigo ?? '';
+    const fator = Number(l.fator ?? 1);
+
+    // Só interessa quando a unidade do código difere da de contagem E a
+    // conversão não é 1:1 — o resto é ruído na tela de quem conta.
+    const relevante =
+      alternativa !== '' && alternativa !== base && Number.isFinite(fator) && fator !== 1 && fator > 0;
+
+    return {
+      codigoProduto: String(l.codigoProduto),
+      descricao: l.descricao,
+      unidade: base,
+      unidadeDoCodigo: relevante
+        ? {
+            unidade: alternativa,
+            // 'D' divide, qualquer outra coisa multiplica.
+            equivale: l.operacao === 'D' ? 1 / fator : fator,
+          }
+        : null,
+    };
+  });
 }
 
-// A validação deve ficar no servidor, não só na tela: um leitor pode mandar o
-// SKU interno ou o EAN/UPC cadastrado em TGFBAR. Comparar o texto do bipe com
-// CODPROD apenas recusaria produtos válidos; aceitar qualquer texto, por outro
-// lado, permitiria registrar a contagem com a caixa errada.
+// O código lido é o CODPROD do produto, ou um código de barras cadastrado
+// para ele no ERP?
 export async function codigoBipadoIdentificaProduto(
   codigoBipado: string,
   codigoProduto: string

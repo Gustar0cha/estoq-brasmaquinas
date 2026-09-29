@@ -119,11 +119,14 @@ const conferirEtiquetaSchema = z.object({
   empresaCodigo: z.string().min(1),
   rua: z.string().nullable(),
   predio: z.string().nullable(),
+  // Opcional de propósito: APK antigo não manda, e aí a conferência cai no
+  // prédio, como era antes.
+  nivel: z.string().nullable().optional(),
   codigo: z.string().min(1),
 });
 
-// "Essa etiqueta é do prédio que eu abri?" — perguntado uma vez por prédio,
-// no momento do bipe, pra o erro aparecer na hora e não itens depois.
+// "Essa etiqueta é do nível que eu abri?" — perguntado uma vez por nível, no
+// momento do bipe, pra o erro aparecer na hora e não itens depois.
 contagemRouter.post('/conferir-etiqueta', autenticar, async (req, res) => {
   const dados = conferirEtiquetaSchema.parse(req.body);
   res.json(await contagemService.conferirEtiquetaDoPredio(dados));

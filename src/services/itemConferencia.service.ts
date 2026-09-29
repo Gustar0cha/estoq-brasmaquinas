@@ -1,8 +1,9 @@
 import { uploadFotoContagem, obterFotoStream, removerFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
-import { codigoBipadoIdentificaProduto, getMovimentacoesSankhya } from '../sankhya/client';
+import { getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
+import { bipeIdentificaProduto } from './contagem.service';
 import { criarNotificacao } from './notificacao.service';
 import { parsearLocalizacao } from '../sankhya/localizacao';
 
@@ -379,11 +380,13 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
   if (!grupo) {
     throw new Error(`Grupo produto+local ${input.chave} não encontrado`);
   }
-  if (input.codigoProdutoBipado) {
-    const produtoValido = await codigoBipadoIdentificaProduto(input.codigoProdutoBipado, grupo.codigoProduto);
+  // Só confere se houve bipe: item sem código de barras é contado pela lista.
+  // E vale também o código aprendido no histórico — ver bipeIdentificaProduto.
+  if (input.codigoProdutoBipado?.trim()) {
+    const produtoValido = await bipeIdentificaProduto(input.codigoProdutoBipado, grupo.codigoProduto);
     if (!produtoValido) {
       throw new Error(
-        `O código bipado não pertence a ${grupo.descricao}. Bipe o SKU ${grupo.codigoProduto} ou um código de barras cadastrado no Sankhya.`
+        `O código bipado não pertence a ${grupo.descricao}. Bipe o código desse produto, ou conte pela lista se ele não tiver código de barras.`
       );
     }
   }

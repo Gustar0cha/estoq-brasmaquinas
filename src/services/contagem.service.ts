@@ -1122,70 +1122,124 @@ export async function registrarItemForaDoLugar(
 // exigia que o código bipado tivesse item no mesmo ciclo — 49 dos 906 itens
 // abertos passavam na tela e falhavam na hora de contar. Dois validadores com
 // regras diferentes é sempre assim; agora só existe uma regra.
+// Onde fica, fisicamente, o código de uma etiqueta. O endereçamento é estável:
+// nenhum localCodigo aparece em dois prédios diferentes.
+async function ondeFicaEtiqueta(codigo: string, empresaCodigo: string) {
+  return prisma.contagemItem.findFirst({
+    where: { localCodigo: codigo.trim(), empresaCodigo },
+    select: { local: true, rua: true, predio: true, nivel: true },
+  });
+}
+
+// A etiqueta bipada é deste NÍVEL?
+//
+// Não dá pra exigir o código exato do item. A Rua 4 é gaveteira: "Rua 4 ·
+// Prédio 1 · Nível 1" tem 187 gavetas, cada uma com a sua etiqueta e cerca de
+// um item. Exigir o código exato traria de volta um bipe por item — que é
+// justamente o que o bipe por nível eliminou.
+//
+// Quando eu escrevi a regra, nível e etiqueta eram 1:1 (186 para 186). A Rua 4
+// entrou depois e quebrou a premissa: hoje são 1.694 locais para 507 níveis,
+// e 1.196 dos locais são gaveta.
+//
+// A regra certa é a do galpão: vale qualquer etiqueta do mesmo nível. Etiqueta
+// de outro nível, de outro prédio ou de outra rua continua recusada.
 async function conferirBipeDoLocal(
-  item: { localCodigo: string; local: string },
+  item: { localCodigo: string; local: string; empresaCodigo: string; rua: string | null; predio: string | null; nivel: string | null },
   codigoLocalBipado: string
 ): Promise<void> {
-  if (codigoLocalBipado.trim() === item.localCodigo) return;
+  const lido = codigoLocalBipado.trim();
+  if (lido === item.localCodigo) return;
+
+  const onde = await ondeFicaEtiqueta(lido, item.empresaCodigo);
+  if (onde && onde.rua === item.rua && onde.predio === item.predio && onde.nivel === item.nivel) {
+    return;
+  }
 
   throw new Error(
-    `Essa etiqueta não é de ${item.local} — bipe a etiqueta desse nível antes de contar.`
+    onde
+      ? `Essa etiqueta é de ${onde.local}, e o item está em ${item.local}.`
+      : `Não reconheci a etiqueta ${lido}. Bipe uma etiqueta de ${item.local}.`
   );
+}
+
+// O código bipado identifica mesmo este produto?
+//
+// Três fontes valem, da mais confiável pra menos: o próprio CODPROD, o código
+// de barras cadastrado no ERP (TGFBAR) e o histórico de bipes já confirmados.
+// A terceira é indispensável: o Sankhya tem código cadastrado pra 183
+// produtos, e é pelo histórico que os outros resolvem — conferir só contra
+// CODPROD e TGFBAR recusaria o bipe que o próprio app acabou de aceitar.
+export async function bipeIdentificaProduto(
+  codigoBipado: string,
+  codigoProduto: string
+): Promise<boolean> {
+  if (await codigoBipadoIdentificaProduto(codigoBipado, codigoProduto)) return true;
+
+  const { produtos } = await resolverProdutoDoBipe(codigoBipado);
+  return produtos.some((p) => p.codigoProduto === codigoProduto.trim());
 }
 
 async function conferirBipeDoProduto(
   item: { codigoProduto: string; descricao: string },
   codigoProdutoBipado: string
 ): Promise<void> {
-  const valido = await codigoBipadoIdentificaProduto(codigoProdutoBipado, item.codigoProduto);
-  if (valido) return;
+  // Sem código lido não há o que conferir. Metade do estoque não tem código de
+  // barras nenhum — conexão de ferro fundido solta não carrega etiqueta —, e
+  // exigir o bipe aqui travaria justamente esses itens.
+  if (!codigoProdutoBipado.trim()) return;
+
+  if (await bipeIdentificaProduto(codigoProdutoBipado, item.codigoProduto)) return;
 
   throw new Error(
-    `O código bipado não pertence a ${item.descricao}. Bipe o SKU ${item.codigoProduto} ou um código de barras cadastrado no Sankhya.`
+    `O código bipado não pertence a ${item.descricao}. Bipe o código desse produto, ou conte pela lista se ele não tiver código de barras.`
   );
 }
 
 export type ConferenciaEtiqueta =
-  | { resultado: 'DESTE_PREDIO'; local: string }
-  | { resultado: 'OUTRO_PREDIO'; local: string; onde: string }
+  | { resultado: 'DESTE_NIVEL'; local: string }
+  | { resultado: 'OUTRO_LUGAR'; local: string; onde: string }
   | { resultado: 'DESCONHECIDA' };
 
-// Responde, na hora do bipe, se a etiqueta lida é mesmo do prédio aberto.
+// Responde, na hora do bipe, se a etiqueta lida é mesmo do nível aberto.
 //
-// A validação de verdade sempre existiu em conferirBipeDoLocal, mas só rodava
-// quando o item ia ser contado. Na prática o colaborador bipava a etiqueta
-// errada, via "Prédio bipado ✓" e só descobria o erro itens depois — ou nunca,
-// se desistisse do prédio. Perguntar aqui custa um request por prédio.
+// A validação de verdade vive em conferirBipeDoLocal, mas só roda quando o
+// item vai ser contado. Sem perguntar aqui, o colaborador bipava a etiqueta
+// errada, via "Nível bipado ✓" e só descobria o erro itens depois — ou nunca.
 //
-// O app não consegue decidir isso sozinho: ele só conhece os locais que estão
-// na tarefa dele, e um prédio tem níveis que podem não estar nela (Rua 8
-// Prédio 1 tem 6 níveis). Rejeitar pelo que o app conhece recusaria etiqueta
-// boa de nível vizinho.
+// O app não consegue decidir isso sozinho, e a Rua 4 mostra por quê: um nível
+// lá tem 187 gavetas, repartidas entre duas pessoas. Quem abre o nível só
+// carrega os itens DELE, então metade das etiquetas do próprio nível é
+// desconhecida para o app. Só o servidor enxerga o endereçamento inteiro.
+//
+// Responde exatamente o que conferirBipeDoLocal vai decidir depois: uma regra
+// só, pra tela nunca liberar o que a contagem vai recusar.
 export async function conferirEtiquetaDoPredio(input: {
   empresaCodigo: string;
   rua: string | null;
   predio: string | null;
+  nivel?: string | null;
   codigo: string;
 }): Promise<ConferenciaEtiqueta> {
-  // Onde fica esse código, fisicamente. O endereçamento é estável: medido na
-  // produção, nenhum localCodigo aponta pra mais de um prédio.
-  const local = await prisma.contagemItem.findFirst({
-    where: { localCodigo: input.codigo.trim(), empresaCodigo: input.empresaCodigo },
-    select: { local: true, rua: true, predio: true },
-  });
+  const local = await ondeFicaEtiqueta(input.codigo, input.empresaCodigo);
 
-  // Local que nunca entrou numa contagem. Não dá pra afirmar que está errado,
-  // então não trava: quem decide é o servidor na hora de contar o item.
+  // Local que nunca entrou numa contagem: não dá pra afirmar que está errado.
   if (!local) return { resultado: 'DESCONHECIDA' };
 
-  if (local.rua === input.rua && local.predio === input.predio) {
-    return { resultado: 'DESTE_PREDIO', local: local.local };
+  const mesmoPredio = local.rua === input.rua && local.predio === input.predio;
+  // `nivel` ausente = pergunta antiga, do tempo em que o bipe valia pro prédio
+  // inteiro. Aceita pelo prédio pra não quebrar APK já instalado.
+  const mesmoNivel = input.nivel === undefined || local.nivel === input.nivel;
+
+  if (mesmoPredio && mesmoNivel) {
+    return { resultado: 'DESTE_NIVEL', local: local.local };
   }
 
   return {
-    resultado: 'OUTRO_PREDIO',
+    resultado: 'OUTRO_LUGAR',
     local: local.local,
-    onde: rotuloDoGrupo(local.rua, local.predio),
+    onde: rotuloDoGrupo(local.rua, local.predio) +
+      (local.nivel ? ` · ${rotuloDaSubdivisao(local.nivel)}` : ''),
   };
 }
 
