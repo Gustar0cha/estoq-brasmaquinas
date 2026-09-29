@@ -1128,30 +1128,23 @@ export async function registrarItemForaDoLugar(
 // Bipe validado (colaborador confirma um item já atribuído)
 // ---------------------------------------------------------------------------
 
-// O item já existe (PENDENTE, atribuído pelo admin) — aqui só confirma, por
-// bipe, que o colaborador está de fato no local esperado. Só valida o LOCAL
-// (a etiqueta de prateleira é gerada pelo próprio WMS/Sankhya, então o
-// código bipado bate direto com CODLOCAL). O código de produto bipado é só
-// evidência, não validação: os produtos aqui não têm CODBARRA cadastrado no
-// Sankhya, então o que a câmera lê é o código de barras real do fabricante
-// (ex: EAN-13 impresso pela TETIS/WEG/etc), que nunca vai bater com o código
-// interno do produto (CODPROD) — comparar os dois bloquearia bipes 100%
-// corretos.
+// O bipe do LOCAL virou um passo só por tarefa: a pessoa abre a tarefa, bipa
+// uma etiqueta da prateleira, e aquele prédio inteiro fica aberto pra contar.
+// Antes era um bipe por item, e depois um por nível — os dois cobravam da
+// pessoa um gesto a cada produto, e é isso que a operação pediu pra tirar.
 //
-// A etiqueta é do NÍVEL, e é ela que vale. Não existe etiqueta de prédio:
-// medido na produção, nível e local são 1:1 (186 níveis, 186 códigos, nenhuma
-// ambiguidade nos dois sentidos). Quem conta está de pé num nível, e é o
-// código daquele nível que ele tem diante dos olhos.
+// A conferência olha RUA e PRÉDIO, nada mais fino. Nível não descreve este
+// galpão: a Rua 4 é gaveteira e um único "nível" lá tem 187 gavetas, cada uma
+// com a sua etiqueta, repartidas entre duas pessoas — exigir o nível recusava
+// etiquetas legítimas que a pessoa tinha na mão.
 //
-// Um bipe por nível continua cobrindo todos os itens dele — que é o que
-// evitava bipar 46 vezes o mesmo código num prédio de 46 itens (média real:
-// 8,5 itens por nível).
+// E a conferência avisa, não trava: quem está no corredor com o galpão
+// parado não pode ficar preso por uma etiqueta que o cadastro não conhece.
+// Sempre há a saída de escolher o prédio pela descrição.
 //
-// Aceitar a etiqueta de um nível VIZINHO, como esta função já fez, custou
-// caro: a tela olhava o endereçamento inteiro e liberava, e aqui a busca
-// exigia que o código bipado tivesse item no mesmo ciclo — 49 dos 906 itens
-// abertos passavam na tela e falhavam na hora de contar. Dois validadores com
-// regras diferentes é sempre assim; agora só existe uma regra.
+// O código do produto nunca foi validação, só evidência: os produtos não têm
+// CODBARRA no TGFPRO, então o que a câmera lê é o EAN do fabricante e nunca
+// baterá com o CODPROD.
 // Onde fica, fisicamente, o código de uma etiqueta. O endereçamento é estável:
 // nenhum localCodigo aparece em dois prédios diferentes.
 async function ondeFicaEtiqueta(codigo: string, empresaCodigo: string) {
@@ -1161,36 +1154,80 @@ async function ondeFicaEtiqueta(codigo: string, empresaCodigo: string) {
   });
 }
 
-// A etiqueta bipada é deste NÍVEL?
+// A etiqueta bipada bate com o endereço do item?
 //
-// Não dá pra exigir o código exato do item. A Rua 4 é gaveteira: "Rua 4 ·
-// Prédio 1 · Nível 1" tem 187 gavetas, cada uma com a sua etiqueta e cerca de
-// um item. Exigir o código exato traria de volta um bipe por item — que é
-// justamente o que o bipe por nível eliminou.
+// A conferência do local saiu do item e virou UM passo por tarefa: a pessoa
+// bipa a prateleira uma vez, abre aquele prédio e conta tudo que está nele.
+// Quando ela chega aqui o local já foi confirmado lá atrás — este bipe é o
+// mesmo código sendo carregado pra virar evidência no registro.
 //
-// Quando eu escrevi a regra, nível e etiqueta eram 1:1 (186 para 186). A Rua 4
-// entrou depois e quebrou a premissa: hoje são 1.694 locais para 507 níveis,
-// e 1.196 dos locais são gaveta.
+// Por isso esta função NÃO recusa mais nada. A regra antiga era por nível, e
+// o galpão não sustenta nível: a Rua 4 é gaveteira, "Prédio 1 · Nível 1" tem
+// 187 gavetas repartidas entre duas pessoas, e metade das etiquetas do
+// próprio nível era desconhecida pra quem estava lá. A operação pediu
+// explicitamente pra conferência não chegar a travar a contagem.
 //
-// A regra certa é a do galpão: vale qualquer etiqueta do mesmo nível. Etiqueta
-// de outro nível, de outro prédio ou de outra rua continua recusada.
+// O que sobrou é o aviso: rua/prédio diferentes ficam registrados no log pro
+// gestor enxergar, e a contagem segue.
 async function conferirBipeDoLocal(
-  item: { localCodigo: string; local: string; empresaCodigo: string; rua: string | null; predio: string | null; nivel: string | null },
+  item: { localCodigo: string; local: string; empresaCodigo: string; rua: string | null; predio: string | null },
   codigoLocalBipado: string
 ): Promise<void> {
   const lido = codigoLocalBipado.trim();
-  if (lido === item.localCodigo) return;
+  if (!lido || lido === item.localCodigo) return;
 
   const onde = await ondeFicaEtiqueta(lido, item.empresaCodigo);
-  if (onde && onde.rua === item.rua && onde.predio === item.predio && onde.nivel === item.nivel) {
-    return;
-  }
+  if (onde && onde.rua === item.rua && onde.predio === item.predio) return;
 
-  throw new Error(
-    onde
-      ? `Essa etiqueta é de ${onde.local}, e o item está em ${item.local}.`
-      : `Não reconheci a etiqueta ${lido}. Bipe uma etiqueta de ${item.local}.`
+  console.warn(
+    `[contagem] bipe de local fora do prédio: etiqueta ${lido} (${onde?.local ?? 'desconhecida'}) ` +
+      `usada no item de ${item.local}.`
   );
+}
+
+export type LocalDaEtiqueta =
+  | { resultado: 'DA_TAREFA'; local: string; rua: string | null; predio: string | null }
+  | { resultado: 'FORA_DA_TAREFA'; local: string; onde: string }
+  | { resultado: 'DESCONHECIDA' };
+
+// "Essa etiqueta é de algum prédio desta tarefa?" — a pergunta do único bipe
+// de local que sobrou, feito uma vez ao abrir a tarefa.
+//
+// Confere por RUA e PRÉDIO, nunca pelo código exato nem pelo dono do item.
+// É o que conserta a gaveteira: quem abre a Rua 4 Prédio 1 pega na mão
+// qualquer uma das 187 etiquetas de lá, inclusive as dos itens do colega, e
+// todas têm que valer — elas descrevem o mesmo prédio.
+export async function localDaEtiquetaNaTarefa(input: {
+  codigo: string;
+  tarefaId: string;
+  usuarioId: string;
+}): Promise<LocalDaEtiqueta> {
+  const codigo = input.codigo.trim();
+  if (!codigo) return { resultado: 'DESCONHECIDA' };
+
+  const onde = await prisma.contagemItem.findFirst({
+    where: { localCodigo: codigo },
+    select: { local: true, rua: true, predio: true },
+  });
+  if (!onde) return { resultado: 'DESCONHECIDA' };
+
+  const meus = await prisma.contagemItem.count({
+    where: {
+      tarefaId: input.tarefaId,
+      atribuidoParaId: input.usuarioId,
+      rua: onde.rua,
+      predio: onde.predio,
+    },
+  });
+
+  if (meus > 0) {
+    return { resultado: 'DA_TAREFA', local: onde.local, rua: onde.rua, predio: onde.predio };
+  }
+  return {
+    resultado: 'FORA_DA_TAREFA',
+    local: onde.local,
+    onde: rotuloDoGrupo(onde.rua, onde.predio),
+  };
 }
 
 // O código bipado identifica mesmo este produto?
@@ -1231,19 +1268,12 @@ export type ConferenciaEtiqueta =
   | { resultado: 'OUTRO_LUGAR'; local: string; onde: string }
   | { resultado: 'DESCONHECIDA' };
 
-// Responde, na hora do bipe, se a etiqueta lida é mesmo do nível aberto.
+// A pergunta do APK antigo: "essa etiqueta é do lugar que eu abri?".
 //
-// A validação de verdade vive em conferirBipeDoLocal, mas só roda quando o
-// item vai ser contado. Sem perguntar aqui, o colaborador bipava a etiqueta
-// errada, via "Nível bipado ✓" e só descobria o erro itens depois — ou nunca.
-//
-// O app não consegue decidir isso sozinho, e a Rua 4 mostra por quê: um nível
-// lá tem 187 gavetas, repartidas entre duas pessoas. Quem abre o nível só
-// carrega os itens DELE, então metade das etiquetas do próprio nível é
-// desconhecida para o app. Só o servidor enxerga o endereçamento inteiro.
-//
-// Responde exatamente o que conferirBipeDoLocal vai decidir depois: uma regra
-// só, pra tela nunca liberar o que a contagem vai recusar.
+// Continua respondendo pelo mesmo critério do app novo — rua e prédio — pra
+// que celular atualizado e celular por atualizar concordem sobre a mesma
+// etiqueta. O app novo usa localDaEtiquetaNaTarefa, que ainda diz de qual
+// prédio DA TAREFA a etiqueta é.
 export async function conferirEtiquetaDoPredio(input: {
   empresaCodigo: string;
   rua: string | null;
@@ -1256,12 +1286,9 @@ export async function conferirEtiquetaDoPredio(input: {
   // Local que nunca entrou numa contagem: não dá pra afirmar que está errado.
   if (!local) return { resultado: 'DESCONHECIDA' };
 
-  const mesmoPredio = local.rua === input.rua && local.predio === input.predio;
-  // `nivel` ausente = pergunta antiga, do tempo em que o bipe valia pro prédio
-  // inteiro. Aceita pelo prédio pra não quebrar APK já instalado.
-  const mesmoNivel = input.nivel === undefined || local.nivel === input.nivel;
-
-  if (mesmoPredio && mesmoNivel) {
+  // Prédio, e só. `nivel` ainda chega de APK antigo e é ignorado de
+  // propósito: era essa exigência que recusava a etiqueta da gaveta ao lado.
+  if (local.rua === input.rua && local.predio === input.predio) {
     return { resultado: 'DESTE_NIVEL', local: local.local };
   }
 
@@ -1407,6 +1434,9 @@ export interface ContagemItemResumoDTO {
   local: string;
   rua: string | null;
   predio: string | null;
+  // O nível vem separado porque a lista agrupa por ele dentro do prédio: é
+  // assim que a prateleira é percorrida.
+  nivel: string | null;
   // Já contado? Calculado aqui pra tela não precisar dos campos de status.
   feito: boolean;
 }
@@ -1461,6 +1491,7 @@ export async function getContagemItensResumo(filtro: {
       local: i.local,
       rua: i.rua,
       predio: i.predio,
+      nivel: i.nivel,
       feito: CONCLUIDOS.includes(i.status as StatusContagemItem),
     }));
 }

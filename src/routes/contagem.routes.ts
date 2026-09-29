@@ -273,6 +273,23 @@ contagemItensRouter.get('/resumo', autenticar, async (req, res) => {
   );
 });
 
+// O único bipe de local que sobrou: "a etiqueta que eu tenho na mão é de
+// algum prédio desta tarefa?". Antes de "/:id" pra não virar um id literal.
+contagemItensRouter.get('/etiqueta', autenticar, async (req, res) => {
+  const { codigo, tarefaId } = req.query;
+  if (typeof codigo !== 'string' || typeof tarefaId !== 'string') {
+    res.status(400).json({ erro: 'Informe codigo e tarefaId.' });
+    return;
+  }
+  res.json(
+    await contagemService.localDaEtiquetaNaTarefa({
+      codigo,
+      tarefaId,
+      usuarioId: req.usuario!.sub,
+    })
+  );
+});
+
 // Precisa vir antes de "/:id" pra não ser confundida com um id literal.
 contagemItensRouter.get('/divergencias', autenticar, exigirAdmin, async (req, res) => {
   const { dataInicio, dataFim } = req.query;
@@ -322,10 +339,12 @@ const iniciarContagemItemSchema = z.object({
   // etiqueta. Medido: em Rua 8 Prédio 1, só 3 dos 45 produtos resolvem no
   // bipe. Exigi-lo travava a contagem desses itens.
   //
-  // O bipe do LOCAL continua obrigatório: é ele que prova que a pessoa esteve
-  // no endereço, e é ele que o servidor confere.
+  // O bipe do LOCAL também é opcional aqui — não porque deixou de importar,
+  // mas porque mudou de lugar: agora ele acontece UMA vez, ao abrir a tarefa
+  // (ver localDaEtiquetaNaTarefa). O app carrega o código bipado lá pra cá,
+  // e ele é gravado como evidência do endereço.
   codigoProdutoBipado: z.string().default(''),
-  codigoLocalBipado: z.string().min(1),
+  codigoLocalBipado: z.string().default(''),
 });
 
 // O item já existe (PENDENTE, atribuído pelo admin) — aqui o colaborador só
