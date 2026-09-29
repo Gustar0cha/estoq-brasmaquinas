@@ -1,6 +1,6 @@
 import { uploadFotoContagem, obterFotoStream, removerFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
-import { getMovimentacoesSankhya } from '../sankhya/client';
+import { codigoBipadoIdentificaProduto, getMovimentacoesSankhya } from '../sankhya/client';
 import { TipoMovimentacaoSankhya } from '../sankhya/types';
 import { StatusConferencia } from './movimentacoes.service';
 import { criarNotificacao } from './notificacao.service';
@@ -378,6 +378,14 @@ export async function enviarConferenciaItem(input: EnviarConferenciaItemInput): 
   const grupo = grupos.get(input.chave);
   if (!grupo) {
     throw new Error(`Grupo produto+local ${input.chave} não encontrado`);
+  }
+  if (input.codigoProdutoBipado) {
+    const produtoValido = await codigoBipadoIdentificaProduto(input.codigoProdutoBipado, grupo.codigoProduto);
+    if (!produtoValido) {
+      throw new Error(
+        `O código bipado não pertence a ${grupo.descricao}. Bipe o SKU ${grupo.codigoProduto} ou um código de barras cadastrado no Sankhya.`
+      );
+    }
   }
 
   // A conferência nasce dentro da tarefa em que o item foi distribuído. Se o

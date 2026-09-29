@@ -3,6 +3,7 @@ import { uploadFotoContagem, obterFotoStream } from '../lib/minio';
 import { prisma } from '../lib/prisma';
 import {
   buscarProdutosSankhya,
+  codigoBipadoIdentificaProduto,
   ehLocalDeQuarentena,
   getLocaisEsperadosDoProduto,
   getProdutoPorCodigoBarras,
@@ -999,6 +1000,7 @@ export async function registrarItemForaDoLugar(
   if (ehLocalDeQuarentena(base.local)) {
     throw new Error(`${base.local} é área de quarentena — produto em quarentena não entra na contagem.`);
   }
+  await conferirBipeDoProduto(base, input.codigoProdutoBipado);
 
   const jaExiste = await prisma.contagemItem.findFirst({
     where: {
@@ -1131,6 +1133,18 @@ async function conferirBipeDoLocal(
   );
 }
 
+async function conferirBipeDoProduto(
+  item: { codigoProduto: string; descricao: string },
+  codigoProdutoBipado: string
+): Promise<void> {
+  const valido = await codigoBipadoIdentificaProduto(codigoProdutoBipado, item.codigoProduto);
+  if (valido) return;
+
+  throw new Error(
+    `O código bipado não pertence a ${item.descricao}. Bipe o SKU ${item.codigoProduto} ou um código de barras cadastrado no Sankhya.`
+  );
+}
+
 export type ConferenciaEtiqueta =
   | { resultado: 'DESTE_PREDIO'; local: string }
   | { resultado: 'OUTRO_PREDIO'; local: string; onde: string }
@@ -1186,6 +1200,7 @@ export async function iniciarContagemItem(input: IniciarContagemItemInput): Prom
   if (ehLocalDeQuarentena(item.local)) {
     throw new Error(`${item.local} é área de quarentena — produto em quarentena não entra na contagem.`);
   }
+  await conferirBipeDoProduto(item, input.codigoProdutoBipado);
   await conferirBipeDoLocal(item, input.codigoLocalBipado);
 
   const atualizado = await prisma.contagemItem.update({
@@ -1231,6 +1246,7 @@ export async function iniciarSegundaContagemItem(
   if (item.quantidadeConferida2 !== null) {
     throw new Error('A 2ª contagem desse item já foi registrada.');
   }
+  await conferirBipeDoProduto(item, codigoProdutoBipado);
   await conferirBipeDoLocal(item, codigoLocalBipado);
 
   const atualizado = await prisma.contagemItem.update({
@@ -2217,6 +2233,7 @@ export async function registrarContagemAvulsa(
   const prefixo = ehFilial(usuario.filial) ? prefixoDaFilial(usuario.filial) : undefined;
   const base = await getSaldoTotalDoProduto(input.codigoProduto, prefixo);
   if (!base) throw new Error('Não achei esse produto no Sankhya. Confira o código.');
+  if (input.codigoProdutoBipado) await conferirBipeDoProduto(base, input.codigoProdutoBipado);
 
   const bateuDisponivel = input.quantidadeConferida === base.quantidadeDisponivel;
   const bateuTotal = input.quantidadeConferida === base.quantidadeTotal;

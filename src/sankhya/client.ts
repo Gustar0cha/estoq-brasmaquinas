@@ -13,8 +13,8 @@ import { FiltroMovimentacoesSankhya, ItemMovimentacaoSankhya, MovimentacaoSankhy
 // errado — o resto do backend não muda:
 //   - PAR.NOMEPARC (nome do parceiro/fornecedor/cliente, join com TGFPAR)
 //   - PRO.CODVOL (código de unidade do produto — é o CÓDIGO, não a sigla "UN")
-// `codigoBarras` não é buscado (TGFPRO.CODBARRA não existe neste ambiente e
-// o app não usa mais leitura de código de barras) — fica sempre "".
+// `codigoBarras` não é preenchido na carga dos itens: no Sankhya desta
+// operação ele vive em TGFBAR, onde é consultado no momento do bipe.
 //
 // `local` vem de TGFLOC.DESCRLOCAL (join por ITE.CODLOCALORIG), igual na
 // query original de vocês; se não houver local cadastrado, cai pro código.
@@ -1358,6 +1358,22 @@ export async function getProdutoPorCodigoBarras(
     descricao: l.descricao,
     unidade: l.unidade ?? '',
   }));
+}
+
+// A validação deve ficar no servidor, não só na tela: um leitor pode mandar o
+// SKU interno ou o EAN/UPC cadastrado em TGFBAR. Comparar o texto do bipe com
+// CODPROD apenas recusaria produtos válidos; aceitar qualquer texto, por outro
+// lado, permitiria registrar a contagem com a caixa errada.
+export async function codigoBipadoIdentificaProduto(
+  codigoBipado: string,
+  codigoProduto: string
+): Promise<boolean> {
+  const lido = codigoBipado.trim();
+  if (!lido) return false;
+  if (lido === codigoProduto.trim()) return true;
+
+  const produtos = await getProdutoPorCodigoBarras(lido);
+  return produtos.some((produto) => produto.codigoProduto === codigoProduto.trim());
 }
 
 interface LinhaLocalEsperadoSankhya {
