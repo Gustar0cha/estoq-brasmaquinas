@@ -1388,6 +1388,83 @@ export async function getContagemItens(filtro?: FiltroContagemItens): Promise<Co
   return filtro?.atribuidoPara ? dtos.filter((i) => i.atribuidoPara === filtro.atribuidoPara) : dtos;
 }
 
+// A lista do colaborador, enxuta.
+//
+// A lista completa tem 1.142 KB para 1.324 itens, e o aparelho engasgava: era
+// baixar, parsear e reagrupar isso a cada abertura de tarefa. Aqui vai só o
+// que a tela precisa para MOSTRAR a linha — contar de verdade carrega o item
+// inteiro por id, um de cada vez.
+//
+// E tirar peso não é o único ganho: a lista completa mandava
+// `quantidadeEsperada` nos 1.324 itens, ou seja, o esperado viajava até o
+// aparelho de quem deveria contar às cegas. Aqui ele não existe.
+export interface ContagemItemResumoDTO {
+  id: string;
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  // Endereço já pronto pra mostrar na linha ("RUA 4 PRÉDIO 1 NÍVEL 1 G 01").
+  local: string;
+  rua: string | null;
+  predio: string | null;
+  // Já contado? Calculado aqui pra tela não precisar dos campos de status.
+  feito: boolean;
+}
+
+const CONCLUIDOS: StatusContagemItem[] = ['CONFERIDA', 'DIVERGENCIA', 'DIVERGENCIA_LOCAL'];
+
+export async function getContagemItensResumo(filtro: {
+  atribuidoPara: string;
+  tarefaIds?: string[];
+  semContagemFechada?: boolean;
+  filial?: string | null;
+}): Promise<ContagemItemResumoDTO[]> {
+  const itens = await prisma.contagemItem.findMany({
+    where: {
+      // O filtro por pessoa vai no BANCO, não em memória: antes vinha a tabela
+      // inteira pro Node só pra descartar o que era de outro.
+      atribuidoParaId: filtro.atribuidoPara,
+      ...(filtro.tarefaIds && filtro.tarefaIds.length > 0
+        ? { tarefaId: { in: filtro.tarefaIds } }
+        : {}),
+      ...(filtro.semContagemFechada
+        ? { OR: [{ cicloId: null }, { ciclo: { status: { not: 'FECHADO' } } }] }
+        : {}),
+      ...(ehFilial(filtro.filial)
+        ? { localCodigo: { startsWith: prefixoDaFilial(filtro.filial) } }
+        : {}),
+    },
+    select: {
+      id: true, codigoProduto: true, descricao: true, unidade: true,
+      local: true, rua: true, predio: true, nivel: true, status: true,
+    },
+  });
+
+  // Ordem de quem anda pelo galpão: rua, prédio, nível e só então o produto.
+  // Feito aqui pra o aparelho não ordenar 1.300 linhas a cada render.
+  const porNumero = (a: string | null, b: string | null) =>
+    (a ?? 'zzz').localeCompare(b ?? 'zzz', 'pt-BR', { numeric: true });
+
+  return itens
+    .sort(
+      (a, b) =>
+        porNumero(a.rua, b.rua) ||
+        porNumero(a.predio, b.predio) ||
+        porNumero(a.nivel, b.nivel) ||
+        a.descricao.localeCompare(b.descricao, 'pt-BR')
+    )
+    .map((i) => ({
+      id: i.id,
+      codigoProduto: i.codigoProduto,
+      descricao: i.descricao,
+      unidade: i.unidade,
+      local: i.local,
+      rua: i.rua,
+      predio: i.predio,
+      feito: CONCLUIDOS.includes(i.status as StatusContagemItem),
+    }));
+}
+
 export async function getDivergenciasContagem(filtro?: {
   dataInicio?: Date;
   dataFim?: Date;

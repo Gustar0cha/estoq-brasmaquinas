@@ -258,6 +258,21 @@ contagemItensRouter.get('/', autenticar, async (req, res) => {
   res.json(itens);
 });
 
+// A lista do colaborador, enxuta — ver getContagemItensResumo.
+// Antes de "/:id" pra não virar um id literal.
+contagemItensRouter.get('/resumo', autenticar, async (req, res) => {
+  const { tarefaIds, semContagemFechada } = req.query;
+  res.json(
+    await contagemService.getContagemItensResumo({
+      atribuidoPara: req.usuario!.sub,
+      tarefaIds:
+        typeof tarefaIds === 'string' && tarefaIds ? tarefaIds.split(',').filter(Boolean) : undefined,
+      semContagemFechada: semContagemFechada === 'true',
+      filial: await filialDoRequisitante(req.usuario?.sub),
+    })
+  );
+});
+
 // Precisa vir antes de "/:id" pra não ser confundida com um id literal.
 contagemItensRouter.get('/divergencias', autenticar, exigirAdmin, async (req, res) => {
   const { dataInicio, dataFim } = req.query;
