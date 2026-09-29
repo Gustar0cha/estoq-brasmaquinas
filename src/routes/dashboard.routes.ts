@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { autenticar, exigirAdmin } from '../middleware/auth';
-import { getDashboardContagem } from '../services/dashboard.service';
+import { getDashboardContagem, getDashboardQuarentena } from '../services/dashboard.service';
 
 export const dashboardRouter = Router();
 
@@ -34,4 +34,8 @@ dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
   }
 
   res.json(await getDashboardContagem(parse.data));
+});
+
+dashboardRouter.get('/quarentena', autenticar, exigirAdmin, async (_req, res) => {
+  res.json(await getDashboardQuarentena());
 });

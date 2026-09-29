@@ -184,6 +184,74 @@ const JUNCOES_ITEM = `
   LEFT JOIN TSIEMP EMP ON S.CODEMP = EMP.CODEMP
 `;
 
+// Estoque que está fisicamente em locais marcados como QUARENTENA no Sankhya.
+// A contagem normal exclui esses locais; esta leitura os expõe separadamente
+// para acompanhamento, sempre usando o saldo atual e não uma cópia antiga.
+export interface ItemQuarentenaSankhya {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  local: string;
+  empresaCodigo: string;
+  empresaNome: string;
+  quantidade: number;
+}
+
+interface LinhaItemQuarentena {
+  codigoProduto: number;
+  descricao: string;
+  unidade: string | null;
+  local: string | null;
+  empresaCodigo: number;
+  empresaNome: string | null;
+  quantidade: number;
+}
+
+export async function getItensQuarentena(empresa?: string): Promise<ItemQuarentenaSankhya[]> {
+  const empresaNum = empresa && Number.isFinite(Number(empresa)) ? Number(empresa) : null;
+  const chave = `itens-quarentena|${empresaNum ?? 'todas'}`;
+
+  return comCache(chave, VALIDADE_SALDO_MS, async () => {
+    const linhas: LinhaItemQuarentena[] = [];
+    let offset = 0;
+
+    while (true) {
+      const pagina = await executarQuery<LinhaItemQuarentena>(`
+        SELECT
+          S.CODPROD AS "codigoProduto",
+          MAX(PRO.DESCRPROD) AS "descricao",
+          MAX(PRO.CODVOL) AS "unidade",
+          MAX(COALESCE(LOC.DESCRLOCAL, TO_CHAR(S.CODLOCAL))) AS "local",
+          S.CODEMP AS "empresaCodigo",
+          MAX(EMP.NOMEFANTASIA) AS "empresaNome",
+          MAX(S.TOTAL) AS "quantidade"
+        FROM (${SUBCONSULTA_SALDO}) S
+        INNER JOIN TGFPRO PRO ON S.CODPROD = PRO.CODPROD
+        LEFT JOIN TGFLOC LOC ON S.CODLOCAL = LOC.CODLOCAL
+        LEFT JOIN TSIEMP EMP ON S.CODEMP = EMP.CODEMP
+        WHERE UPPER(NVL(LOC.DESCRLOCAL, ' ')) LIKE '%QUARENTENA%'
+          ${empresaNum === null ? '' : `AND S.CODEMP = ${empresaNum}`}
+        GROUP BY S.CODPROD, S.CODLOCAL, S.CODEMP
+        ORDER BY MAX(S.TOTAL) DESC, MAX(PRO.DESCRPROD)
+        OFFSET ${offset} ROWS FETCH NEXT ${PAGINA} ROWS ONLY
+      `);
+      linhas.push(...pagina);
+      if (pagina.length < PAGINA) break;
+      offset += PAGINA;
+    }
+
+    return linhas.map((linha) => ({
+      codigoProduto: String(linha.codigoProduto),
+      descricao: linha.descricao,
+      unidade: linha.unidade ?? '',
+      local: linha.local ?? 'Local de quarentena',
+      empresaCodigo: String(linha.empresaCodigo),
+      empresaNome: linha.empresaNome ?? `Empresa ${linha.empresaCodigo}`,
+      quantidade: Number(linha.quantidade) || 0,
+    }));
+  });
+}
+
 // Todos os itens com saldo num lote de locais de uma empresa — usado ao
 // atribuir um prédio inteiro, em vez de consultar produto a produto.
 export async function getItensComSaldoPorLocais(

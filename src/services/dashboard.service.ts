@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma';
 import { chaveCusto, getCustosSemIcms, getGruposDeProduto } from '../sankhya/client';
+import { getItensQuarentena } from '../sankhya/estoque';
 
 // Dashboard da contagem, em dois modos.
 //
@@ -150,6 +151,23 @@ export interface DashboardContagem {
   operadoresAtivos: number;
 }
 
+export interface ItemQuarentenaDashboard {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  local: string;
+  empresaNome: string;
+  quantidade: number;
+  custoUnitario: number;
+  valorTotal: number;
+}
+
+export interface DashboardQuarentena {
+  atualizadoEm: string;
+  totais: { itens: number; skus: number; quantidade: number; custo: number };
+  itens: ItemQuarentenaDashboard[];
+}
+
 const STATUS_CONTADO = ['CONFERIDA', 'DIVERGENCIA', 'DIVERGENCIA_LOCAL'];
 const STATUS_DIVERGENTE = ['DIVERGENCIA', 'DIVERGENCIA_LOCAL'];
 
@@ -185,6 +203,42 @@ function dataFinal(item: ItemDashboard): Date | null {
 
 function foiContado(item: ItemDashboard): boolean {
   return STATUS_CONTADO.includes(item.status) && quantidadeFinal(item) !== null;
+}
+
+// A quarentena não pertence a uma tarefa: é o saldo que o ERP mantém nos
+// locais de quarentena agora. Por isso tem endpoint próprio e não entra na
+// soma de contagem dos projetos.
+export async function getDashboardQuarentena(empresaCodigo?: string): Promise<DashboardQuarentena> {
+  const brutos = await getItensQuarentena(empresaCodigo);
+  const custos = await getCustosSemIcms(
+    brutos.map((item) => ({ codigoProduto: item.codigoProduto, empresaCodigo: item.empresaCodigo }))
+  );
+  const itens = brutos
+    .map((item) => {
+      const custoUnitario = custos.get(chaveCusto(item.codigoProduto, item.empresaCodigo)) ?? 0;
+      return {
+        codigoProduto: item.codigoProduto,
+        descricao: item.descricao,
+        unidade: item.unidade,
+        local: item.local,
+        empresaNome: item.empresaNome,
+        quantidade: item.quantidade,
+        custoUnitario,
+        valorTotal: item.quantidade * custoUnitario,
+      };
+    })
+    .sort((a, b) => b.valorTotal - a.valorTotal || b.quantidade - a.quantidade);
+
+  return {
+    atualizadoEm: new Date().toISOString(),
+    totais: {
+      itens: itens.length,
+      skus: new Set(itens.map((item) => item.codigoProduto)).size,
+      quantidade: itens.reduce((soma, item) => soma + item.quantidade, 0),
+      custo: itens.reduce((soma, item) => soma + item.valorTotal, 0),
+    },
+    itens,
+  };
 }
 
 function diaDe(data: Date): string {
