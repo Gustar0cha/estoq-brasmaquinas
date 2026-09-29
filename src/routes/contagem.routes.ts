@@ -244,6 +244,10 @@ contagemRouter.post('/remover-atribuicao', autenticar, exigirAdmin, async (req, 
 
 contagemItensRouter.get('/', autenticar, async (req, res) => {
   const { status, atribuidoPara, dataInicio, dataFim, semContagemFechada, concluida } = req.query;
+  if (concluida === 'true' && req.usuario?.role !== 'ADMIN') {
+    res.status(403).json({ erro: 'Relatório restrito a administradores.' });
+    return;
+  }
   const inicio = typeof dataInicio === 'string' ? new Date(dataInicio) : undefined;
   const fim = typeof dataFim === 'string' ? new Date(dataFim) : undefined;
   if ((inicio && Number.isNaN(inicio.getTime())) || (fim && Number.isNaN(fim.getTime()))) {
