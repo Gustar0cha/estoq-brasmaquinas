@@ -7,7 +7,7 @@ import { autenticar, exigirAdmin } from '../middleware/auth';
 import * as contagemService from '../services/contagem.service';
 import { getPanoramaEstoque } from '../services/panorama.service';
 import { StatusContagemItem } from '../services/contagem.service';
-import { CAPACIDADES_FLUXO_LIVRE } from '../services/operacaoLivre.service';
+import { CAPACIDADES_FLUXO_LIVRE, contagemPorCopiaDisponivel } from '../services/operacaoLivre.service';
 
 
 // Guarda a foto em memória (nunca em disco no servidor) e repassa direto
@@ -17,7 +17,9 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 export const contagemRouter = Router();
 export const contagemItensRouter = Router();
 
-contagemRouter.get('/capacidades', autenticar, (_req, res) => res.json(CAPACIDADES_FLUXO_LIVRE));
+contagemRouter.get('/capacidades', autenticar, async (_req, res) => {
+  res.json({ ...CAPACIDADES_FLUXO_LIVRE, contagemPorCopia: await contagemPorCopiaDisponivel() });
+});
 
 // A loja de quem está pedindo decide o que ele enxerga (os locais das outras
 // lojas somem da interface). Vem do banco, não do token: o token antigo dos

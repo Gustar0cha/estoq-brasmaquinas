@@ -21,6 +21,7 @@ import { projetoRouter } from './routes/projeto.routes';
 import { relatoriosRouter } from './routes/relatorios.routes';
 import { tarefaRouter } from './routes/tarefa.routes';
 import { usuariosRouter } from './routes/usuarios.routes';
+import { contagemLivreRouter } from './routes/contagemLivre.routes';
 import { CAPACIDADES_FLUXO_LIVRE } from './services/operacaoLivre.service';
 
 export const app = express();
@@ -58,6 +59,7 @@ app.get('/health', (_req, res) => res.json({ ok: true, fluxoLivre: CAPACIDADES_F
 
 app.use('/auth', authRouter);
 app.use('/usuarios', usuariosRouter);
+app.use('/contagem-livre', contagemLivreRouter);
 app.use('/movimentacoes', movimentacoesRouter);
 app.use('/item-conferencia', itemConferenciaRouter);
 app.use('/notificacoes', notificacoesRouter);

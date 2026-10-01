@@ -20,6 +20,21 @@ export const FILIAIS: { valor: Filial; label: string; prefixo: string }[] = [
 
 export const PREFIXOS_DE_LOJA = FILIAIS.map((f) => f.prefixo);
 
+// Empresa do Sankhya (CODEMP) de cada loja, conferido na TSIEMP em 01/10/2026:
+// 1 BRASMAQUINAS GUANAMBI, 2 BRASMAQUINAS LAPA, 3 BRASMAQUINAS LEM,
+// 4 J.P. IRRIGACAO JANAUBA. A cópia de estoque (TGFCTE) sai por empresa, e é
+// por aqui que o celular de cada loja acha a contagem que vale pra ele.
+const EMPRESA_DA_FILIAL: Record<Filial, string> = {
+  GUANAMBI: '1',
+  LAPA: '2',
+  LUIS_EDUARDO: '3',
+  JANAUBA: '4',
+};
+
+export function empresaDaFilial(filial: string | null | undefined): string | null {
+  return ehFilial(filial) ? EMPRESA_DA_FILIAL[filial] : null;
+}
+
 export function ehFilial(valor: string | null | undefined): valor is Filial {
   return FILIAIS.some((f) => f.valor === valor);
 }

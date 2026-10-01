@@ -56,6 +56,12 @@ model Usuario {
   notificacaoPreferencias NotificacaoPreferencia[]
   notificacoes            Notificacao[]
 
+  contagensLivresCriadas     ContagemLivre[]           @relation("ContagemLivreCriadaPor")
+  contagemLivreSessoes       ContagemLivreSessao[]
+  contagemLivreRegistros     ContagemLivreRegistro[]
+  contagemLivreRecontPedidas ContagemLivreRecontagem[] @relation("RecontagemPedidaPor")
+  contagemLivreRecontAtrib   ContagemLivreRecontagem[] @relation("RecontagemAtribuidaPara")
+
   @@map("usuarios")
 }
 
@@ -564,4 +570,165 @@ model Divergencia {
   comentarioAdmin     String?
 
   @@map("divergencias")
+}
+
+
+// ---------------------------------------------------------------------------
+// Contagem livre (01/10/2026)
+// ---------------------------------------------------------------------------
+//
+// Substitui a distribuição de tarefas. O gestor escolhe uma CÓPIA DE ESTOQUE
+// do Sankhya (TGFCTE: sai uma por dia e por empresa, sempre às 00:00) e a
+// equipe conta contra ela: bipa a etiqueta do local, bipa os produtos que
+// estão ali, registra a quantidade e finaliza o local.
+//
+// Ninguém recebe lista de itens. Quem conta escolhe o local; o sistema só
+// confere se o produto bipado pertence a ele e se já não foi contado.
+model ContagemLivre {
+  id        String   @id @default(uuid())
+  nome      String
+  // TGFCTE.DTCONTAGEM da cópia escolhida. É ela que vira o rótulo
+  // "Cópia Estoque Dia 01/10/2026" no app e no painel.
+  dataCopia DateTime
+  // CODEMP que entram. Uma empresa só pode estar numa contagem ativa por vez:
+  // é assim que o celular de cada loja sabe, sem perguntar, contra o quê está
+  // contando.
+  empresas  String[]
+  // PREPARANDO → ATIVA → ENCERRADA. PREPARANDO é o tempo de copiar ~23 mil
+  // linhas do Sankhya; ERRO guarda o motivo em `erro`.
+  status    String   @default("PREPARANDO")
+  erro      String?
+
+  // Configurações, mudáveis com a contagem em andamento.
+  //   fotoObrigatoria — foto exigida a cada registro; desligada, a etapa some.
+  //   travaLocal      — só aceita produto que a cópia diz estar naquele local.
+  //                     O que estiver fora entra pelo "registrar fora do local".
+  //   travaDuplicada  — o mesmo produto no mesmo local só é contado uma vez.
+  fotoObrigatoria Boolean @default(true)
+  travaLocal      Boolean @default(true)
+  travaDuplicada  Boolean @default(true)
+
+  criadaPor   Usuario   @relation("ContagemLivreCriadaPor", fields: [criadaPorId], references: [id])
+  criadaPorId String
+  criadaEm    DateTime  @default(now())
+  encerradaEm DateTime?
+
+  estoque     ContagemLivreEstoque[]
+  sessoes     ContagemLivreSessao[]
+  registros   ContagemLivreRegistro[]
+  recontagens ContagemLivreRecontagem[]
+
+  @@index([status])
+  @@map("contagem_livre")
+}
+
+// O retrato da cópia, gravado uma vez quando a contagem é criada. Copiar pra
+// cá em vez de consultar o Sankhya a cada bipe é o que deixa a conferência
+// instantânea e imune a queda do gateway no meio do galpão.
+model ContagemLivreEstoque {
+  id            String        @id @default(uuid())
+  contagem      ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId    String
+  empresaCodigo String
+  codigoProduto String
+  descricao     String
+  unidade       String
+  localCodigo   String
+  local         String
+  // TGFCTE.QTDEST somado (o mesmo produto+local vem em mais de uma linha
+  // quando tem lote: 34 pares na cópia de 01/10).
+  quantidadeTotal     Float
+  // TGFEST.RESERVADO no momento em que a contagem foi criada — a cópia não
+  // traz reserva. Disponível = total − reservado.
+  quantidadeReservada Float  @default(0)
+  // TGFCUS.CUSSEMICM mais recente do produto na empresa.
+  custoSemIcms        Float?
+
+  @@unique([contagemId, codigoProduto, localCodigo, empresaCodigo])
+  @@index([contagemId, localCodigo])
+  @@index([contagemId, codigoProduto])
+  @@map("contagem_livre_estoque")
+}
+
+// Um local aberto por alguém: do bipe da etiqueta até "Finalizar".
+model ContagemLivreSessao {
+  id             String        @id @default(uuid())
+  contagem       ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId     String
+  localCodigo    String
+  local          String
+  empresaCodigo  String?
+  // 1 = contagem; 2 = recontagem pedida pelo gestor.
+  numeroContagem Int           @default(1)
+  usuario        Usuario       @relation(fields: [usuarioId], references: [id])
+  usuarioId      String
+  iniciadaEm     DateTime      @default(now())
+  finalizadaEm   DateTime?
+
+  registros ContagemLivreRegistro[]
+
+  @@index([contagemId, localCodigo])
+  @@index([usuarioId, finalizadaEm])
+  @@map("contagem_livre_sessoes")
+}
+
+model ContagemLivreRegistro {
+  id             String              @id @default(uuid())
+  contagem       ContagemLivre       @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId     String
+  sessao         ContagemLivreSessao @relation(fields: [sessaoId], references: [id], onDelete: Cascade)
+  sessaoId       String
+  numeroContagem Int                 @default(1)
+  empresaCodigo  String
+  codigoProduto  String
+  descricao      String
+  unidade        String
+  localCodigo    String
+  local          String
+  quantidade     Float
+  // O produto não consta na cópia NAQUELE local. Calculado pelo servidor,
+  // nunca informado pelo app: vale mesmo com a trava de local desligada.
+  foraDoLocal    Boolean             @default(false)
+  codigoBipado   String?
+  usuario        Usuario             @relation(fields: [usuarioId], references: [id])
+  usuarioId      String
+  // Bipe (ou escolha) do produto → toque em "Registrar".
+  iniciadoEm     DateTime
+  registradoEm   DateTime            @default(now())
+  fotoChave      String?
+  // A trava de duplicidade mora no banco: preenchida (contagem|produto|local|
+  // empresa|número) quando a trava está ligada, nula quando desligada. O
+  // Postgres aceita vários NULL num índice único, então desligar a trava
+  // libera a repetição sem mudar o esquema — e ligada, nem dois celulares
+  // registrando no mesmo instante conseguem furar.
+  chaveUnica     String?             @unique
+
+  @@index([contagemId, codigoProduto, localCodigo])
+  @@index([sessaoId])
+  @@index([contagemId, usuarioId])
+  @@map("contagem_livre_registros")
+}
+
+// Item que o gestor mandou recontar. Quem reconta não pode ser quem contou.
+model ContagemLivreRecontagem {
+  id              String        @id @default(uuid())
+  contagem        ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId      String
+  empresaCodigo   String
+  codigoProduto   String
+  descricao       String
+  unidade         String
+  localCodigo     String
+  local           String
+  solicitadaPor   Usuario       @relation("RecontagemPedidaPor", fields: [solicitadaPorId], references: [id])
+  solicitadaPorId String
+  solicitadaEm    DateTime      @default(now())
+  // Nulo = qualquer colaborador da loja, menos quem fez a 1ª contagem.
+  atribuidaPara   Usuario?      @relation("RecontagemAtribuidaPara", fields: [atribuidaParaId], references: [id])
+  atribuidaParaId String?
+  concluidaEm     DateTime?
+
+  @@unique([contagemId, codigoProduto, localCodigo, empresaCodigo])
+  @@index([contagemId, localCodigo])
+  @@map("contagem_livre_recontagens")
 }
