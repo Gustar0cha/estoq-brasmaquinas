@@ -61,6 +61,9 @@ model Usuario {
   contagemLivreRegistros     ContagemLivreRegistro[]
   contagemLivreRecontPedidas ContagemLivreRecontagem[] @relation("RecontagemPedidaPor")
   contagemLivreRecontAtrib   ContagemLivreRecontagem[] @relation("RecontagemAtribuidaPara")
+  logsAcoes                  LogAcao[]
+  locaisIgnorados            LocalIgnorado[]
+  quarentenasMovidas         ContagemLivreQuarentena[]
 
   @@map("usuarios")
 }
@@ -617,6 +620,8 @@ model ContagemLivre {
   sessoes     ContagemLivreSessao[]
   registros   ContagemLivreRegistro[]
   recontagens ContagemLivreRecontagem[]
+  donos       ContagemLivreItemDono[]
+  quarentenas ContagemLivreQuarentena[]
 
   @@index([status])
   @@map("contagem_livre")
@@ -731,4 +736,83 @@ model ContagemLivreRecontagem {
   @@unique([contagemId, codigoProduto, localCodigo, empresaCodigo])
   @@index([contagemId, localCodigo])
   @@map("contagem_livre_recontagens")
+}
+
+
+// Quem contou cada item (contagem|produto|local|empresa|número). Uma linha só
+// por item, garantida pelo banco: é o que impede duas pessoas de contarem o
+// mesmo produto no mesmo local, com a trava de duplicidade ligada OU
+// desligada. Desligada, ela só deixa a MESMA pessoa somar em partes.
+//
+// Nasceu de um caso real (02/10/2026): Rone e Ytann contaram os mesmos 4
+// produtos no local 202023, com a trava desligada, e as contagens se somaram.
+model ContagemLivreItemDono {
+  chave      String        @id
+  contagem   ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId String
+  usuarioId  String
+  criadoEm   DateTime      @default(now())
+
+  @@index([contagemId])
+  @@map("contagem_livre_item_donos")
+}
+
+// Item divergente que o gestor mandou pra quarentena: sai das divergências e
+// da acuracidade, e fica aqui como registro — com os números do momento, pra
+// o relatório de quarentena não depender da contagem continuar existindo.
+model ContagemLivreQuarentena {
+  id                   String         @id @default(uuid())
+  contagem             ContagemLivre? @relation(fields: [contagemId], references: [id], onDelete: SetNull)
+  contagemId           String?
+  contagemNome         String
+  empresaCodigo        String
+  codigoProduto        String
+  descricao            String
+  unidade              String
+  localCodigo          String
+  local                String
+  quantidadeContada    Float
+  quantidadeDisponivel Float
+  quantidadeDivergente Float
+  custoUnitario        Float?
+  observacao           String?
+  usuario              Usuario        @relation(fields: [usuarioId], references: [id])
+  usuarioId            String
+  criadoEm             DateTime       @default(now())
+
+  @@unique([contagemId, codigoProduto, localCodigo, empresaCodigo])
+  @@index([criadoEm])
+  @@map("contagem_livre_quarentenas")
+}
+
+// Locais que existem no Sankhya mas não são usados (endereçamento antigo,
+// áreas desativadas). Ficam fora da contagem inteira: não abrem no celular,
+// não entram no progresso, nos "não contados" nem na acuracidade.
+model LocalIgnorado {
+  localCodigo String   @id
+  local       String
+  motivo      String?
+  criadoPor   Usuario  @relation(fields: [criadoPorId], references: [id])
+  criadoPorId String
+  criadoEm    DateTime @default(now())
+
+  @@map("locais_ignorados")
+}
+
+// Trilha do que cada pessoa fez no sistema — inclusive quem desligou trava,
+// excluiu ou editou. O nome vai copiado: o log sobrevive ao login apagado.
+model LogAcao {
+  id           String   @id @default(uuid())
+  usuario      Usuario? @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+  usuarioId    String?
+  usuarioNome  String
+  acao         String
+  descricao    String
+  detalhes     Json?
+  criadoEm     DateTime @default(now())
+
+  @@index([criadoEm])
+  @@index([acao])
+  @@index([usuarioId])
+  @@map("logs_acoes")
 }

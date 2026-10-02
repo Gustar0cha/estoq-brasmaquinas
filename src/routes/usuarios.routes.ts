@@ -1,3 +1,4 @@
+import { registrarLog } from '../lib/logAcao';
 import { Router } from 'express';
 import { z } from 'zod';
 
@@ -37,6 +38,7 @@ usuariosRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
 
   try {
     const usuario = await usuariosService.criarUsuario(parse.data);
+    void registrarLog(req.usuario!.sub, 'USUARIO_CRIADO', `Criou o login ${usuario.nome} (${usuario.login}), ${usuario.role === 'ADMIN' ? 'administrador' : 'operador'}.`, { usuarioId: usuario.id });
     res.status(201).json(usuario);
   } catch (error) {
     res.status(409).json({ erro: error instanceof Error ? error.message : 'Não foi possível criar o usuário.' });
@@ -62,6 +64,8 @@ usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
 
   try {
     const usuario = await usuariosService.atualizarUsuario(id, parse.data);
+    const mudou = Object.keys(parse.data).map((c) => (c === 'senha' ? 'senha' : c === 'ativo' ? (parse.data.ativo ? 'reativou' : 'desativou') : c));
+    void registrarLog(req.usuario!.sub, 'USUARIO_EDITADO', `Editou o login ${usuario.nome}: ${mudou.join(', ')}.`, { usuarioId: id, campos: Object.keys(parse.data) });
     res.json(usuario);
   } catch (error) {
     res
@@ -79,7 +83,10 @@ usuariosRouter.delete('/:id', autenticar, exigirAdmin, async (req, res) => {
     return;
   }
   try {
-    res.json(await usuariosService.apagarUsuario(id));
+    const alvo = await usuariosService.getUsuarios().then((l) => l.find((u) => u.id === id));
+    const resultado = await usuariosService.apagarUsuario(id);
+    void registrarLog(req.usuario!.sub, 'USUARIO_EXCLUIDO', `${resultado.apagado ? 'Excluiu' : 'Desativou (tem histórico)'} o login ${alvo?.nome ?? id}.`, { usuarioId: id });
+    res.json(resultado);
   } catch (error) {
     res
       .status(400)

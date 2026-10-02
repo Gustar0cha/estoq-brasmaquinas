@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 
 import { empresaDaFilial, filialDoLocal, labelFilial, localVisivelPara } from '../lib/filiais';
+import { registrarLog } from '../lib/logAcao';
 import { validarFotoContagem } from '../lib/fotoContagem';
 import { obterFotoStream, removerFotoContagem, uploadFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
@@ -11,6 +12,7 @@ import {
   getReservadosSankhya,
 } from '../sankhya/client';
 import { getCustosDaCopia, getLocalSankhya, getRetratoCopia, listarCopiasEstoque } from '../sankhya/copiaEstoque';
+import { parsearLocalizacao } from '../sankhya/localizacao';
 import { resolverProdutoDoBipe } from './contagem.service';
 
 // Contagem livre (01/10/2026).
@@ -48,6 +50,30 @@ function nomeEmpresa(codigo: string): string {
 // PREPARANDO parado há mais que isso é processo que morreu no meio (deploy,
 // queda do servidor): a cópia nunca vai terminar sozinha.
 const PREPARO_EXPIRA_MS = 15 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Dono do item e locais ignorados
+// ---------------------------------------------------------------------------
+
+// A identidade de um item contado: contagem|produto|local|empresa|número.
+function chaveItem(contagemId: string, codigoProduto: string, localCodigo: string, empresaCodigo: string, numero: number) {
+  return `${contagemId}|${codigoProduto}|${localCodigo}|${empresaCodigo}|${numero}`;
+}
+
+let cacheIgnorados: { em: number; codigos: Set<string> } | null = null;
+
+// Os locais marcados como ignorados em Configurações. Lidos a cada abertura
+// de local e a cada relatório; 15 s de cache bastam pra não martelar o banco.
+export async function codigosIgnorados(): Promise<Set<string>> {
+  if (cacheIgnorados && Date.now() - cacheIgnorados.em < 15_000) return cacheIgnorados.codigos;
+  const linhas = await prisma.localIgnorado.findMany({ select: { localCodigo: true } });
+  cacheIgnorados = { em: Date.now(), codigos: new Set(linhas.map((l) => l.localCodigo)) };
+  return cacheIgnorados.codigos;
+}
+
+export function esquecerIgnorados() {
+  cacheIgnorados = null;
+}
 
 // ---------------------------------------------------------------------------
 // Datas da cópia
@@ -256,6 +282,12 @@ export async function criarContagemLivre(input: CriarContagemLivreInput): Promis
   // Copiar ~23 mil linhas do Sankhya leva perto de um minuto: segue por
   // baixo, e o painel acompanha pelo status.
   void prepararRetrato(criada.id);
+  void registrarLog(input.usuarioId, 'CONTAGEM_CRIADA', `Criou a contagem "${nome}" com a ${rotuloCopia(dataCopia)} (${empresas.map(nomeEmpresa).join(', ')}).`, {
+    contagemId: criada.id,
+    fotoObrigatoria: criada.fotoObrigatoria,
+    travaLocal: criada.travaLocal,
+    travaDuplicada: criada.travaDuplicada,
+  });
   return montarContagem(criada);
 }
 
@@ -375,9 +407,16 @@ export async function copiasEmUso(): Promise<{ id: string; nome: string; rotuloC
   }));
 }
 
+const NOME_CONFIG = {
+  fotoObrigatoria: 'a foto obrigatória',
+  travaLocal: 'a trava de local',
+  travaDuplicada: 'a trava de duplicidade',
+} as const;
+
 export async function atualizarContagemLivre(
   contagemId: string,
-  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean }
+  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean },
+  usuarioId: string
 ): Promise<ContagemLivreDTO> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!c) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
@@ -392,10 +431,23 @@ export async function atualizarContagemLivre(
       ...(dados.travaDuplicada !== undefined ? { travaDuplicada: dados.travaDuplicada } : {}),
     },
   });
+  // Uma linha por mudança: "desligou a trava de local" é o que se procura no log.
+  for (const campo of Object.keys(NOME_CONFIG) as (keyof typeof NOME_CONFIG)[]) {
+    if (dados[campo] !== undefined && dados[campo] !== c[campo]) {
+      void registrarLog(usuarioId, 'CONTAGEM_CONFIGURADA', `${dados[campo] ? 'Ligou' : 'Desligou'} ${NOME_CONFIG[campo]} em "${atualizada.nome}".`, {
+        contagemId,
+        campo,
+        valor: dados[campo],
+      });
+    }
+  }
+  if (nome && nome !== c.nome) {
+    void registrarLog(usuarioId, 'CONTAGEM_CONFIGURADA', `Renomeou "${c.nome}" para "${nome}".`, { contagemId });
+  }
   return montarContagem(atualizada);
 }
 
-export async function encerrarContagemLivre(contagemId: string): Promise<ContagemLivreDTO> {
+export async function encerrarContagemLivre(contagemId: string, usuarioId: string): Promise<ContagemLivreDTO> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!c) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
   if (c.status === 'ENCERRADA') return montarContagem(c);
@@ -409,19 +461,29 @@ export async function encerrarContagemLivre(contagemId: string): Promise<Contage
     where: { id: contagemId },
     data: { status: 'ENCERRADA', encerradaEm: agora },
   });
+  void registrarLog(usuarioId, 'CONTAGEM_ENCERRADA', `Encerrou a contagem "${c.nome}".`, { contagemId });
   return montarContagem(encerrada);
 }
 
-// Só apaga contagem sem nenhum registro: a que nasceu errada (cópia ou loja
-// trocada) ou falhou na preparação. Contagem com trabalho dentro se encerra.
-export async function excluirContagemLivre(contagemId: string): Promise<void> {
+// Excluir apaga a contagem e TUDO dela: retrato, locais, registros, fotos e
+// recontagens. Com registros dentro só passa com `forcar` — o painel pede
+// confirmação digitada. O que foi pra quarentena fica no relatório de
+// quarentena (o vínculo vira nulo, o registro não some).
+export async function excluirContagemLivre(contagemId: string, usuarioId: string, forcar = false): Promise<void> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!c) return;
-  const registros = await prisma.contagemLivreRegistro.count({ where: { contagemId } });
-  if (registros > 0) {
-    throw new ErroContagemLivre('Essa contagem já tem itens contados. Encerre em vez de excluir.');
+  const registros = await prisma.contagemLivreRegistro.findMany({ where: { contagemId }, select: { fotoChave: true } });
+  if (registros.length > 0 && !forcar) {
+    throw new ErroContagemLivre(`Essa contagem tem ${registros.length} itens contados. Confirme a exclusão com os dados.`, 'TEM_REGISTROS');
   }
   await prisma.contagemLivre.delete({ where: { id: contagemId } });
+  for (const r of registros) {
+    if (r.fotoChave) await removerFotoContagem(r.fotoChave).catch(() => undefined);
+  }
+  void registrarLog(usuarioId, 'CONTAGEM_EXCLUIDA', `Excluiu a contagem "${c.nome}" (${rotuloCopia(c.dataCopia)})${registros.length ? ` com ${registros.length} registros` : ''}.`, {
+    contagemId,
+    registros: registros.length,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +711,9 @@ export async function abrirLocal(input: {
   if (!localVisivelPara(codigo, usuario.filial)) {
     throw new ErroContagemLivre(`Esse local não é da loja ${labelFilial(usuario.filial)}.`, 'OUTRA_LOJA');
   }
+  if ((await codigosIgnorados()).has(codigo)) {
+    throw new ErroContagemLivre('Esse local está marcado como ignorado nas contagens. Fale com o gestor se ele voltou a ser usado.', 'LOCAL_IGNORADO');
+  }
 
   const naCopia = await prisma.contagemLivreEstoque.findMany({
     where: { contagemId: contagem.id, localCodigo: codigo },
@@ -714,6 +779,7 @@ export async function abrirLocal(input: {
       usuarioId: usuario.id,
     },
   });
+  void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
   return montarSessao(sessao, contagem, usuario);
 }
 
@@ -902,6 +968,8 @@ async function conferir(
     if (pedido.concluidaEm) {
       return { status: 'JA_CONTADO', produto, mensagem: 'Esse produto já foi recontado.' };
     }
+    const outro = await donoDeOutro(contagem.id, produto, sessao.localCodigo, 2, usuario.id);
+    if (outro) return { status: 'JA_CONTADO', produto, mensagem: outro };
     return { status: 'OK', produto, foraDoLocal: !empresaNoLocal.has(alvo.codigoProduto) };
   }
 
@@ -927,30 +995,48 @@ async function conferir(
     };
   }
 
+  // Outra pessoa já contou: bloqueado SEMPRE, com a trava ligada ou não.
+  const outro = await donoDeOutro(contagem.id, produto, sessao.localCodigo, 1, usuario.id);
+  if (outro) return { status: 'JA_CONTADO', produto, mensagem: outro };
+
+  // A própria pessoa: só com a trava ligada. Desligada, ela soma em partes.
   if (contagem.travaDuplicada) {
-    const ja = await prisma.contagemLivreRegistro.findFirst({
+    const meu = await prisma.contagemLivreRegistro.findFirst({
       where: {
         contagemId: contagem.id,
         codigoProduto: produto.codigoProduto,
         localCodigo: sessao.localCodigo,
         empresaCodigo: produto.empresaCodigo,
         numeroContagem: 1,
+        usuarioId: usuario.id,
       },
-      include: { usuario: { select: { nome: true } } },
     });
-    if (ja) {
+    if (meu) {
       return {
         status: 'JA_CONTADO',
         produto,
-        mensagem:
-          ja.usuarioId === usuario.id
-            ? `Você já contou esse produto aqui às ${quando(ja.registradoEm)}. Pra corrigir, apague o registro em "O que já contei".`
-            : `Esse produto já foi contado neste local por ${ja.usuario.nome} às ${quando(ja.registradoEm)}.`,
+        mensagem: `Você já contou esse produto aqui às ${quando(meu.registradoEm)}. Pra corrigir, apague o registro em "O que já contei".`,
       };
     }
   }
 
   return { status: 'OK', produto, foraDoLocal };
+}
+
+// Se o item já tem dono e o dono é outra pessoa, devolve a frase pra ela.
+async function donoDeOutro(
+  contagemId: string,
+  produto: { codigoProduto: string; empresaCodigo: string },
+  localCodigo: string,
+  numero: number,
+  usuarioId: string
+): Promise<string | null> {
+  const dono = await prisma.contagemLivreItemDono.findUnique({
+    where: { chave: chaveItem(contagemId, produto.codigoProduto, localCodigo, produto.empresaCodigo, numero) },
+  });
+  if (!dono || dono.usuarioId === usuarioId) return null;
+  const quem = await prisma.usuario.findUnique({ where: { id: dono.usuarioId }, select: { nome: true } });
+  return `Esse produto já foi contado neste local por ${quem?.nome ?? 'outra pessoa'} às ${quando(dono.criadoEm)}.`;
 }
 
 export async function registrar(input: {
@@ -1008,6 +1094,24 @@ export async function registrar(input: {
       )
     : null;
 
+  // O item ganha dono ANTES do registro. O índice do banco decide quem chegou
+  // primeiro, então dois celulares no mesmo instante não furam: o segundo
+  // recebe a recusa, com o nome de quem contou.
+  const chaveDoItem = chaveItem(contagem.id, produto.codigoProduto, sessao.localCodigo, produto.empresaCodigo, numero);
+  let donoNovo = false;
+  try {
+    await prisma.contagemLivreItemDono.create({ data: { chave: chaveDoItem, contagemId: contagem.id, usuarioId: usuario.id } });
+    donoNovo = true;
+  } catch (erro) {
+    if ((erro as { code?: string }).code !== 'P2002') throw erro;
+    const dono = await prisma.contagemLivreItemDono.findUnique({ where: { chave: chaveDoItem } });
+    if (dono && dono.usuarioId !== usuario.id) {
+      if (fotoChave) await removerFotoContagem(fotoChave).catch(() => undefined);
+      const quem = await prisma.usuario.findUnique({ where: { id: dono.usuarioId }, select: { nome: true } });
+      throw new ErroContagemLivre(`Esse produto acabou de ser contado neste local por ${quem?.nome ?? 'outra pessoa'}.`, 'JA_CONTADO');
+    }
+  }
+
   // Recontagem é sempre única por item; a 1ª, só com a trava ligada.
   const chaveUnica =
     numero === 2 || contagem.travaDuplicada
@@ -1038,6 +1142,7 @@ export async function registrar(input: {
     });
   } catch (erro) {
     if (fotoChave) await removerFotoContagem(fotoChave).catch(() => undefined);
+    if (donoNovo) await prisma.contagemLivreItemDono.delete({ where: { chave: chaveDoItem } }).catch(() => undefined);
     if ((erro as { code?: string }).code === 'P2002') {
       throw new ErroContagemLivre('Esse produto acabou de ser contado neste local por outra pessoa.', 'JA_CONTADO');
     }
@@ -1056,17 +1161,54 @@ export async function registrar(input: {
     });
   }
 
+  void registrarLog(
+    usuario.id,
+    'ITEM_REGISTRADO',
+    `${numero === 2 ? 'Recontou' : 'Contou'} ${produto.descricao} em ${sessao.local}${foraDoLocal ? ' (fora do local)' : ''}.`,
+    { contagemId: contagem.id, codigoProduto: produto.codigoProduto, localCodigo: sessao.localCodigo, numeroContagem: numero }
+  );
   return montarRegistro(criado, true);
 }
 
+// Quem contou apaga o próprio registro enquanto o local está aberto (é a
+// correção de quem digitou errado). O gestor exclui qualquer item, a
+// qualquer momento — e isso fica no log com o nome dele.
 export async function apagarRegistro(usuarioId: string, registroId: string): Promise<void> {
   const usuario = await usuarioAtivo(usuarioId);
   const registro = await prisma.contagemLivreRegistro.findUnique({ where: { id: registroId } });
-  if (!registro || registro.usuarioId !== usuario.id) throw new ErroContagemLivre('Registro não encontrado.', 'NAO_ENCONTRADA');
-  await sessaoAbertaDe(usuario, registro.sessaoId);
+  const gestor = usuario.role === 'ADMIN';
+  if (!registro || (!gestor && registro.usuarioId !== usuario.id)) {
+    throw new ErroContagemLivre('Registro não encontrado.', 'NAO_ENCONTRADA');
+  }
+  if (!gestor) await sessaoAbertaDe(usuario, registro.sessaoId);
 
   await prisma.contagemLivreRegistro.delete({ where: { id: registro.id } });
   if (registro.fotoChave) await removerFotoContagem(registro.fotoChave).catch(() => undefined);
+
+  // Sem mais nenhum registro daquele item, ele perde o dono e volta a poder
+  // ser contado por qualquer um.
+  const restantes = await prisma.contagemLivreRegistro.count({
+    where: {
+      contagemId: registro.contagemId,
+      codigoProduto: registro.codigoProduto,
+      localCodigo: registro.localCodigo,
+      empresaCodigo: registro.empresaCodigo,
+      numeroContagem: registro.numeroContagem,
+    },
+  });
+  if (restantes === 0) {
+    await prisma.contagemLivreItemDono
+      .delete({ where: { chave: chaveItem(registro.contagemId, registro.codigoProduto, registro.localCodigo, registro.empresaCodigo, registro.numeroContagem) } })
+      .catch(() => undefined);
+  }
+  const autor = registro.usuarioId === usuario.id ? '' : ` (contado por ${(await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa'})`;
+  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && registro.usuarioId !== usuario.id ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}.`, {
+    contagemId: registro.contagemId,
+    registroId: registro.id,
+    codigoProduto: registro.codigoProduto,
+    localCodigo: registro.localCodigo,
+    quantidade: registro.quantidade,
+  });
   if (registro.numeroContagem === 2) {
     await prisma.contagemLivreRecontagem.updateMany({
       where: {
@@ -1084,10 +1226,14 @@ export async function finalizarLocal(usuarioId: string, sessaoId: string): Promi
   const usuario = await usuarioAtivo(usuarioId);
   const sessao = await prisma.contagemLivreSessao.findUnique({ where: { id: sessaoId } });
   if (!sessao || sessao.usuarioId !== usuario.id) throw new ErroContagemLivre('Local não encontrado.', 'NAO_ENCONTRADA');
+  const registros = await prisma.contagemLivreRegistro.count({ where: { sessaoId: sessao.id } });
   if (!sessao.finalizadaEm) {
     await prisma.contagemLivreSessao.update({ where: { id: sessao.id }, data: { finalizadaEm: new Date() } });
+    void registrarLog(usuario.id, 'LOCAL_FINALIZADO', `Finalizou ${sessao.local} com ${registros} ${registros === 1 ? 'registro' : 'registros'}.`, {
+      contagemId: sessao.contagemId,
+      localCodigo: sessao.localCodigo,
+    });
   }
-  const registros = await prisma.contagemLivreRegistro.count({ where: { sessaoId: sessao.id } });
   return { local: sessao.local, registros };
 }
 
@@ -1180,6 +1326,15 @@ export async function pedirRecontagem(input: {
     });
     pedidas += 1;
   }
+  if (pedidas > 0) {
+    const para = input.atribuidaParaId
+      ? (await prisma.usuario.findUnique({ where: { id: input.atribuidaParaId }, select: { nome: true } }))?.nome
+      : null;
+    void registrarLog(input.solicitadaPorId, 'RECONTAGEM_PEDIDA', `Pediu recontagem de ${pedidas} ${pedidas === 1 ? 'item' : 'itens'} em "${contagem.nome}"${para ? ` para ${para}` : ''}.`, {
+      contagemId: contagem.id,
+      itens: input.itens,
+    });
+  }
   return { pedidas, ignoradas };
 }
 
@@ -1233,6 +1388,10 @@ export interface LinhaRelatorioLivre {
   custoSistema: number | null;
   recontagem: 'NAO' | 'PENDENTE' | 'FEITA';
   fotos: { registroId: string; numeroContagem: number }[];
+  // Movido pra quarentena pelo gestor: sai das divergências e da acuracidade.
+  quarentena: { usuario: string; em: string; observacao: string | null } | null;
+  // Os registros que compõem a linha — é por eles que o gestor exclui o item.
+  registros: { id: string; numeroContagem: number; usuario: string; quantidade: number }[];
 }
 
 export async function relatorioContagemLivre(
@@ -1241,7 +1400,7 @@ export async function relatorioContagemLivre(
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [estoque, registros, finalizadas, recontagens] = await Promise.all([
+  const [estoque, registros, finalizadas, recontagens, quarentenas, ignorados] = await Promise.all([
     prisma.contagemLivreEstoque.findMany({
       where: { contagemId },
       select: {
@@ -1260,6 +1419,8 @@ export async function relatorioContagemLivre(
       distinct: ['localCodigo'],
     }),
     prisma.contagemLivreRecontagem.findMany({ where: { contagemId } }),
+    prisma.contagemLivreQuarentena.findMany({ where: { contagemId }, include: { usuario: { select: { nome: true } } } }),
+    codigosIgnorados(),
   ]);
 
   const chaveDe = (p: string, l: string, e: string) => `${p}|${l}|${e}`;
@@ -1283,9 +1444,12 @@ export async function relatorioContagemLivre(
   const recontagemDe = new Map(recontagens.map((r) => [chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo), r]));
   const locaisFinalizados = new Set(finalizadas.map((f) => f.localCodigo));
 
+  const quarentenaDe = new Map(quarentenas.map((q) => [chaveDe(q.codigoProduto, q.localCodigo, q.empresaCodigo), q]));
+
   const chaves = new Set<string>(porItem.keys());
   for (const e of estoque) {
-    if (e.quantidadeTotal > 0 && locaisFinalizados.has(e.localCodigo)) {
+    // Local ignorado nunca gera "não contado": ele não faz parte do estoque usado.
+    if (e.quantidadeTotal > 0 && locaisFinalizados.has(e.localCodigo) && !ignorados.has(e.localCodigo)) {
       chaves.add(chaveDe(e.codigoProduto, e.localCodigo, e.empresaCodigo));
     }
   }
@@ -1307,6 +1471,7 @@ export async function relatorioContagemLivre(
     const item = porItem.get(k) ?? { n1: [], n2: [] };
     const qualquer = item.n1[0] ?? item.n2[0];
     const rec = recontagemDe.get(k);
+    const quar = quarentenaDe.get(k);
 
     const quantidade1 = soma(item.n1);
     const quantidade2 = soma(item.n2);
@@ -1350,6 +1515,13 @@ export async function relatorioContagemLivre(
       fotos: [...item.n1, ...item.n2]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
+      quarentena: quar ? { usuario: quar.usuario.nome, em: quar.criadoEm.toISOString(), observacao: quar.observacao } : null,
+      registros: [...item.n1, ...item.n2].map((r) => ({
+        id: r.id,
+        numeroContagem: r.numeroContagem,
+        usuario: r.usuario.nome,
+        quantidade: r.quantidade,
+      })),
     });
   }
 
@@ -1404,6 +1576,7 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: 'Qtd. 1ª contagem', largura: 11, valor: (l) => l.quantidade1, numero: '#,##0.###' },
     { titulo: 'Qtd. 2ª contagem', largura: 11, valor: (l) => l.quantidade2, numero: '#,##0.###' },
     { titulo: 'Recontagem', largura: 11, valor: (l) => ({ NAO: '', PENDENTE: 'Pendente', FEITA: 'Feita' })[l.recontagem] },
+    { titulo: 'Quarentena', largura: 26, valor: (l) => (l.quarentena ? `${l.quarentena.usuario} · ${formatoHora(l.quarentena.em)}` : '') },
     { titulo: 'Loja', largura: 11, valor: (l) => l.empresa },
   ];
 
@@ -1451,4 +1624,449 @@ export async function fotoDoRegistro(registroId: string) {
   const registro = await prisma.contagemLivreRegistro.findUnique({ where: { id: registroId }, select: { fotoChave: true } });
   if (!registro?.fotoChave) return null;
   return obterFotoStream(registro.fotoChave);
+}
+
+// ---------------------------------------------------------------------------
+// Quarentena
+// ---------------------------------------------------------------------------
+
+// O gestor tira um item divergente da divergência mandando-o pra quarentena.
+// Só vale pra item CONTADO e DIVERGENTE; os números do momento ficam
+// gravados, porque o relatório de quarentena tem que sobreviver à contagem.
+export async function moverParaQuarentena(input: {
+  contagemId: string;
+  itens: { codigoProduto: string; localCodigo: string; empresaCodigo: string }[];
+  usuarioId: string;
+  observacao?: string;
+}): Promise<{ movidos: number; ignorados: string[] }> {
+  const { contagem, linhas } = await relatorioContagemLivre(input.contagemId);
+  const porChave = new Map(linhas.map((l) => [l.chave, l]));
+  const ignorados: string[] = [];
+  const movidos: LinhaRelatorioLivre[] = [];
+
+  for (const item of input.itens) {
+    const l = porChave.get(`${item.codigoProduto}|${item.localCodigo}|${item.empresaCodigo}`);
+    if (!l) {
+      ignorados.push(`${item.codigoProduto} em ${item.localCodigo}: não está no relatório.`);
+      continue;
+    }
+    if (l.quarentena) {
+      ignorados.push(`${l.descricao}: já está em quarentena.`);
+      continue;
+    }
+    if (l.situacao !== 'CONTADO' || l.quantidadeContada === null || !l.quantidadeDivergente) {
+      ignorados.push(`${l.descricao}: só item contado e divergente vai pra quarentena.`);
+      continue;
+    }
+    await prisma.contagemLivreQuarentena.create({
+      data: {
+        contagemId: contagem.id,
+        contagemNome: contagem.nome,
+        empresaCodigo: l.empresaCodigo,
+        codigoProduto: l.codigoProduto,
+        descricao: l.descricao,
+        unidade: l.unidade,
+        localCodigo: l.localCodigo,
+        local: l.local,
+        quantidadeContada: l.quantidadeContada,
+        quantidadeDisponivel: l.quantidadeDisponivel,
+        quantidadeDivergente: l.quantidadeDivergente,
+        custoUnitario: l.custoUnitario,
+        observacao: input.observacao?.trim() || null,
+        usuarioId: input.usuarioId,
+      },
+    });
+    movidos.push(l);
+  }
+
+  if (movidos.length > 0) {
+    void registrarLog(
+      input.usuarioId,
+      'QUARENTENA',
+      movidos.length === 1
+        ? `Moveu para quarentena ${movidos[0].descricao} (${movidos[0].local}), divergência ${movidos[0].quantidadeDivergente}.`
+        : `Moveu ${movidos.length} itens divergentes para quarentena em "${contagem.nome}".`,
+      { contagemId: contagem.id, itens: movidos.map((m) => ({ codigoProduto: m.codigoProduto, localCodigo: m.localCodigo, divergente: m.quantidadeDivergente })) }
+    );
+  }
+  return { movidos: movidos.length, ignorados };
+}
+
+export interface ItemQuarentenaDTO {
+  id: string;
+  contagemId: string | null;
+  contagemNome: string;
+  usuario: string;
+  em: string;
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  localCodigo: string;
+  local: string;
+  empresa: string;
+  quantidadeContada: number;
+  quantidadeDisponivel: number;
+  quantidadeDivergente: number;
+  custoUnitario: number | null;
+  valorDivergente: number | null;
+  observacao: string | null;
+}
+
+export async function listarQuarentena(filtro: { de?: Date; ate?: Date; contagemId?: string }): Promise<ItemQuarentenaDTO[]> {
+  const itens = await prisma.contagemLivreQuarentena.findMany({
+    where: {
+      ...(filtro.contagemId ? { contagemId: filtro.contagemId } : {}),
+      ...(filtro.de || filtro.ate ? { criadoEm: { ...(filtro.de ? { gte: filtro.de } : {}), ...(filtro.ate ? { lte: filtro.ate } : {}) } } : {}),
+    },
+    include: { usuario: { select: { nome: true } } },
+    orderBy: { criadoEm: 'desc' },
+  });
+  return itens.map((q) => ({
+    id: q.id,
+    contagemId: q.contagemId,
+    contagemNome: q.contagemNome,
+    usuario: q.usuario.nome,
+    em: q.criadoEm.toISOString(),
+    codigoProduto: q.codigoProduto,
+    descricao: q.descricao,
+    unidade: q.unidade,
+    localCodigo: q.localCodigo,
+    local: q.local,
+    empresa: nomeEmpresa(q.empresaCodigo),
+    quantidadeContada: q.quantidadeContada,
+    quantidadeDisponivel: q.quantidadeDisponivel,
+    quantidadeDivergente: q.quantidadeDivergente,
+    custoUnitario: q.custoUnitario,
+    valorDivergente: q.custoUnitario === null ? null : Math.round(Math.abs(q.quantidadeDivergente) * q.custoUnitario * 100) / 100,
+    observacao: q.observacao,
+  }));
+}
+
+// O relatório pedido: usuário, data e hora, CODPROD, DESCPROD, quantidade
+// divergente e quantidade contada — nessa ordem, e depois o contexto.
+export async function gerarQuarentenaXlsx(filtro: { de?: Date; ate?: Date; contagemId?: string }) {
+  const itens = await listarQuarentena(filtro);
+  const workbook = new ExcelJS.Workbook();
+  const planilha = workbook.addWorksheet('Quarentena');
+  planilha.addRow(['Itens movidos para quarentena']).font = { bold: true, size: 14 };
+  planilha.addRow([`Gerado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`]);
+  planilha.addRow([]);
+  const colunas: [string, number, (q: ItemQuarentenaDTO) => string | number | null, string?][] = [
+    ['Usuário', 18, (q) => q.usuario],
+    ['Data e hora', 19, (q) => formatoHora(q.em)],
+    ['CODPROD', 11, (q) => Number(q.codigoProduto) || q.codigoProduto],
+    ['DESCPROD', 44, (q) => q.descricao],
+    ['Quantidade Divergente', 13, (q) => q.quantidadeDivergente, '#,##0.###;[Red]-#,##0.###'],
+    ['Quantidade Contada', 12, (q) => q.quantidadeContada, '#,##0.###'],
+    ['Quantidade Disponível', 12, (q) => q.quantidadeDisponivel, '#,##0.###'],
+    ['CODLOCAL', 11, (q) => Number(q.localCodigo) || q.localCodigo],
+    ['DESCLOCAL', 30, (q) => q.local],
+    ['Custo Unitário s/ ICMS', 14, (q) => q.custoUnitario, 'R$ #,##0.00'],
+    ['Valor da Divergência', 15, (q) => q.valorDivergente, 'R$ #,##0.00'],
+    ['Contagem', 24, (q) => q.contagemNome],
+    ['Loja', 11, (q) => q.empresa],
+    ['Observação', 30, (q) => q.observacao],
+  ];
+  const cab = planilha.addRow(colunas.map((c) => c[0]));
+  cab.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  cab.eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E3D' } }; });
+  for (const q of itens) {
+    const linha = planilha.addRow(colunas.map((c) => c[2](q)));
+    colunas.forEach((c, i) => { if (c[3]) linha.getCell(i + 1).numFmt = c[3]; });
+  }
+  colunas.forEach((c, i) => { planilha.getColumn(i + 1).width = c[1]; });
+  planilha.views = [{ state: 'frozen', ySplit: cab.number }];
+  return workbook.xlsx.writeBuffer();
+}
+
+// ---------------------------------------------------------------------------
+// Painel do ciclo (Visão geral e modo TV)
+// ---------------------------------------------------------------------------
+//
+// Cada contagem é um ciclo. A acuracidade é sobre o ESTOQUE INTEIRO do ciclo
+// (o retrato da cópia, sem os locais ignorados): o que já foi contado vale
+// pelo resultado, e o que ainda não foi vale pelo estoque do sistema — ou
+// seja, conta como certo. Ela começa em 100% e cai conforme as divergências
+// aparecem, até o estoque todo ser contado. Item em quarentena sai da conta.
+//
+// O formato é o mesmo DashboardContagem que o modo TV já desenha, pra os
+// gráficos e o mapa do armazém continuarem os mesmos.
+
+export async function dashboardContagemLivre(contagemId: string) {
+  const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
+  if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
+
+  const [{ linhas }, estoque, ignorados, sessoesAbertas, registros, outras] = await Promise.all([
+    relatorioContagemLivre(contagemId),
+    prisma.contagemLivreEstoque.findMany({
+      where: { contagemId, quantidadeTotal: { gt: 0 } },
+      select: { codigoProduto: true, localCodigo: true, empresaCodigo: true, local: true, descricao: true, quantidadeTotal: true, quantidadeReservada: true, custoSemIcms: true },
+    }),
+    codigosIgnorados(),
+    prisma.contagemLivreSessao.findMany({ where: { contagemId, finalizadaEm: null }, select: { localCodigo: true, usuarioId: true } }),
+    prisma.contagemLivreRegistro.findMany({
+      where: { contagemId },
+      select: { usuarioId: true, codigoProduto: true, localCodigo: true, empresaCodigo: true, numeroContagem: true, registradoEm: true, usuario: { select: { nome: true } } },
+    }),
+    prisma.contagemLivre.findMany({ where: { status: 'ATIVA', id: { not: contagemId } }, orderBy: { criadaEm: 'desc' } }),
+  ]);
+
+  const chave = (p: string, l: string, e: string) => `${p}|${l}|${e}`;
+  const linhaDe = new Map(linhas.map((l) => [l.chave, l]));
+  const universo = estoque.filter((e) => !ignorados.has(e.localCodigo));
+  const locaisAbertos = new Set(sessoesAbertas.map((s) => s.localCodigo));
+
+  let contados = 0;
+  let divergencias = 0;
+  let quarentena = 0;
+  let semCusto = 0;
+  let valorTotal = 0;
+  let valorCerto = 0;
+  let valorContado = 0;
+  let valorAContar = 0;
+  let divergenciaAbs = 0;
+  let sobraV = 0;
+  let faltaV = 0;
+  const faltas = { skus: 0, quantidade: 0, custo: 0 };
+  const sobras = { skus: 0, quantidade: 0, custo: 0 };
+  const reservados = { itens: 0, quantidade: 0, valor: 0 };
+  const topFin: { descricao: string; local: string; valor: number }[] = [];
+  const topFis: { descricao: string; local: string; quantidade: number }[] = [];
+  type Bloco = { total: number; contados: number; emAndamento: number; divergencias: number };
+  const ruas = new Map<string, Bloco & { predios: Map<string, Bloco> }>();
+  const novo = (): Bloco => ({ total: 0, contados: 0, emAndamento: 0, divergencias: 0 });
+
+  for (const e of universo) {
+    const l = linhaDe.get(chave(e.codigoProduto, e.localCodigo, e.empresaCodigo));
+    const custo = e.custoSemIcms ?? 0;
+    if (e.custoSemIcms === null) semCusto += 1;
+    if (e.quantidadeReservada > 0) {
+      reservados.itens += 1;
+      reservados.quantidade += e.quantidadeReservada;
+      reservados.valor += e.quantidadeReservada * custo;
+    }
+    const emQuarentena = Boolean(l?.quarentena);
+    const contado = l?.situacao === 'CONTADO';
+    const divergente = contado && !emQuarentena && (l!.quantidadeDivergente ?? 0) !== 0;
+    const valorItem = e.quantidadeTotal * custo;
+
+    if (emQuarentena) quarentena += 1;
+    else {
+      valorTotal += valorItem;
+      if (!divergente) valorCerto += valorItem;
+    }
+    if (contado) {
+      contados += 1;
+      valorContado += (l!.quantidadeContada ?? 0) * custo;
+    } else {
+      valorAContar += valorItem;
+    }
+    if (divergente) {
+      divergencias += 1;
+      const d = l!.quantidadeDivergente!;
+      const v = Math.abs(d) * custo;
+      divergenciaAbs += v;
+      if (d < 0) { faltas.skus += 1; faltas.quantidade += -d; faltas.custo += v; faltaV += v; }
+      else { sobras.skus += 1; sobras.quantidade += d; sobras.custo += v; sobraV += v; }
+      topFin.push({ descricao: e.descricao, local: e.local, valor: v });
+      topFis.push({ descricao: e.descricao, local: e.local, quantidade: Math.abs(d) });
+    }
+
+    const { rua, predio } = parsearLocalizacao(e.local);
+    const r = ruas.get(rua ?? '') ?? { ...novo(), predios: new Map<string, Bloco>() };
+    const pb = r.predios.get(predio ?? '') ?? novo();
+    for (const b of [r, pb]) {
+      b.total += 1;
+      if (contado) b.contados += 1;
+      else if (locaisAbertos.has(e.localCodigo)) b.emAndamento += 1;
+      if (divergente) b.divergencias += 1;
+    }
+    r.predios.set(predio ?? '', pb);
+    ruas.set(rua ?? '', r);
+  }
+
+  // Truncado em duas casas, nunca arredondado: 2 divergências em 11 mil itens
+  // arredondavam pra "100%", e 100% só pode aparecer quando não há nenhuma.
+  const truncar = (v: number) => Math.floor(v * 10000) / 100;
+  const base = universo.length - quarentena;
+  const acuraciaFisica = base > 0 ? truncar((base - divergencias) / base) : 100;
+  const acuraciaFinanceira = valorTotal > 0 ? truncar(valorCerto / valorTotal) : 100;
+  const numerico = (a: string, b: string) => a.localeCompare(b, 'pt-BR', { numeric: true });
+
+  // Ranking e produção por dia saem dos registros de 1ª contagem.
+  const porUsuario = new Map<string, { nome: string; contados: number; divergencias: number }>();
+  const porDia = new Map<string, { contados: number; divergencias: number }>();
+  for (const r of registros) {
+    if (r.numeroContagem !== 1) continue;
+    const l = linhaDe.get(chave(r.codigoProduto, r.localCodigo, r.empresaCodigo));
+    const div = Boolean(l && !l.quarentena && (l.quantidadeDivergente ?? 0) !== 0);
+    const u = porUsuario.get(r.usuarioId) ?? { nome: r.usuario.nome, contados: 0, divergencias: 0 };
+    u.contados += 1;
+    if (div) u.divergencias += 1;
+    porUsuario.set(r.usuarioId, u);
+    const dia = r.registradoEm.toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
+    const d = porDia.get(dia) ?? { contados: 0, divergencias: 0 };
+    d.contados += 1;
+    if (div) d.divergencias += 1;
+    porDia.set(dia, d);
+  }
+
+  const mapa = [...ruas.entries()]
+    .sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : numerico(a[0], b[0])))
+    .map(([rua, r]) => ({
+      rua: rua || null,
+      total: r.total,
+      contados: r.contados,
+      pendentes: r.total - r.contados,
+      emAndamento: r.emAndamento,
+      divergencias: r.divergencias,
+      predios: [...r.predios.entries()]
+        .sort((a, b) => numerico(a[0], b[0]))
+        .map(([predio, p]) => ({ predio: predio || null, total: p.total, contados: p.contados, emAndamento: p.emAndamento, divergencias: p.divergencias })),
+    }));
+
+  const proxima = contagem.status === 'ENCERRADA' && outras[0] ? { id: outras[0].id, nome: outras[0].nome, rotuloCopia: rotuloCopia(outras[0].dataCopia) } : null;
+
+  return {
+    contagem: montarContagem(contagem),
+    proxima,
+    ignorados: ignorados.size,
+    modo: contagem.status === 'ATIVA' ? 'AO_VIVO' : 'HISTORICO',
+    periodo: { inicio: contagem.criadaEm.toISOString(), fim: contagem.encerradaEm?.toISOString() ?? null },
+    atualizadoEm: new Date().toISOString(),
+    empresas: contagem.empresas.map((codigo) => ({ codigo, nome: nomeEmpresa(codigo) })),
+    empresaSelecionada: null,
+    cicloSelecionado: contagem.id,
+    totais: {
+      itens: universo.length,
+      contados,
+      pendentes: universo.length - contados,
+      emAndamento: mapa.reduce((t, r) => t + r.emAndamento, 0),
+      divergencias,
+      divergenciaLocal: linhas.filter((l) => l.foraDoLocal).length,
+      segundaContagem: linhas.filter((l) => l.recontagem === 'PENDENTE').length,
+      percentualConcluido: universo.length ? Math.round((contados / universo.length) * 1000) / 10 : 0,
+      acuracia: acuraciaFisica,
+      itensSemCusto: semCusto,
+      quarentena,
+    },
+    valores: {
+      contado: Math.round(valorContado * 100) / 100,
+      esperado: Math.round(valorTotal * 100) / 100,
+      divergenciaAbsoluta: Math.round(divergenciaAbs * 100) / 100,
+      sobra: Math.round(sobraV * 100) / 100,
+      falta: Math.round(faltaV * 100) / 100,
+      aContar: Math.round(valorAContar * 100) / 100,
+    },
+    ranking: [...porUsuario.entries()]
+      .map(([usuarioId, u]) => ({
+        usuarioId,
+        nome: u.nome,
+        contados: u.contados,
+        divergencias: u.divergencias,
+        acuracia: u.contados ? Math.round(((u.contados - u.divergencias) / u.contados) * 1000) / 10 : 100,
+        pendentes: 0,
+        valorContado: 0,
+      }))
+      .sort((a, b) => b.contados - a.contados),
+    porDia: [...porDia.entries()].sort().map(([dia, d]) => ({ dia, contados: d.contados, divergencias: d.divergencias, valorContado: 0 })),
+    grupos: [],
+    predios: mapa.flatMap((r) => r.predios.map((p) => ({ rua: r.rua, predio: p.predio, total: p.total, contados: p.contados, pendentes: p.total - p.contados, divergencias: p.divergencias }))),
+    acuracidade: {
+      acuraciaFisica,
+      acuraciaFinanceira,
+      metaFisica: 98,
+      metaFinanceira: 99,
+      faltas,
+      sobras,
+      reservados: { ...reservados, valor: Math.round(reservados.valor * 100) / 100 },
+      topDivergenciaFinanceira: topFin.sort((a, b) => b.valor - a.valor).slice(0, 8),
+      topDivergenciaFisica: topFis.sort((a, b) => b.quantidade - a.quantidade).slice(0, 8),
+    },
+    mapa,
+    operadoresAtivos: new Set(sessoesAbertas.map((s) => s.usuarioId)).size,
+  };
+}
+
+// O slide "Quarentena" da TV, no formato que ela já desenha.
+export async function dashboardQuarentena(contagemId: string) {
+  const itens = await listarQuarentena({ contagemId });
+  const valor = (q: ItemQuarentenaDTO) => Math.abs(q.quantidadeDivergente) * (q.custoUnitario ?? 0);
+  return {
+    atualizadoEm: new Date().toISOString(),
+    totais: {
+      itens: itens.length,
+      skus: new Set(itens.map((q) => q.codigoProduto)).size,
+      quantidade: itens.reduce((t, q) => t + Math.abs(q.quantidadeDivergente), 0),
+      custo: Math.round(itens.reduce((t, q) => t + valor(q), 0) * 100) / 100,
+    },
+    itens: itens.map((q) => ({
+      codigoProduto: q.codigoProduto,
+      descricao: q.descricao,
+      unidade: q.unidade,
+      local: q.local,
+      empresaNome: q.empresa,
+      quantidade: Math.abs(q.quantidadeDivergente),
+      custoUnitario: q.custoUnitario ?? 0,
+      valorTotal: Math.round(valor(q) * 100) / 100,
+    })),
+  };
+}
+
+// Locais ignorados (Configurações → Locais).
+export async function listarLocaisIgnorados() {
+  const linhas = await prisma.localIgnorado.findMany({ include: { criadoPor: { select: { nome: true } } }, orderBy: { localCodigo: 'asc' } });
+  return linhas.map((l) => ({ localCodigo: l.localCodigo, local: l.local, motivo: l.motivo, criadoPor: l.criadoPor.nome, criadoEm: l.criadoEm.toISOString() }));
+}
+
+export async function ignorarLocais(locais: { localCodigo: string; local: string }[], usuarioId: string, motivo?: string) {
+  let novos = 0;
+  for (const l of locais) {
+    const r = await prisma.localIgnorado.upsert({
+      where: { localCodigo: l.localCodigo },
+      update: {},
+      create: { localCodigo: l.localCodigo, local: l.local, motivo: motivo?.trim() || null, criadoPorId: usuarioId },
+    });
+    if (r.criadoPorId === usuarioId && Date.now() - r.criadoEm.getTime() < 5000) novos += 1;
+  }
+  esquecerIgnorados();
+  void registrarLog(usuarioId, 'LOCAL_IGNORADO', locais.length === 1 ? `Passou a ignorar o local ${locais[0].local}.` : `Passou a ignorar ${locais.length} locais.`, {
+    locais: locais.map((l) => l.localCodigo),
+    motivo,
+  });
+  return { ignorados: locais.length, novos };
+}
+
+export async function reativarLocal(localCodigo: string, usuarioId: string) {
+  const l = await prisma.localIgnorado.findUnique({ where: { localCodigo } });
+  if (!l) return;
+  await prisma.localIgnorado.delete({ where: { localCodigo } });
+  esquecerIgnorados();
+  void registrarLog(usuarioId, 'LOCAL_REATIVADO', `Voltou a considerar o local ${l.local}.`, { localCodigo });
+}
+
+// Busca de locais pra marcar como ignorados: o retrato da contagem mais
+// recente diz quantos itens cada local tem — é o que ajuda a decidir.
+export async function buscarLocais(busca: string) {
+  const termo = busca.trim();
+  if (termo.length < 2) return [];
+  const recente = await prisma.contagemLivre.findFirst({ where: { status: { in: ['ATIVA', 'ENCERRADA'] } }, orderBy: { criadaEm: 'desc' } });
+  const ignorados = await codigosIgnorados();
+  if (recente) {
+    const grupos = await prisma.contagemLivreEstoque.groupBy({
+      by: ['localCodigo', 'local'],
+      where: {
+        contagemId: recente.id,
+        OR: [{ localCodigo: { startsWith: termo } }, { local: { contains: termo, mode: 'insensitive' } }],
+      },
+      _count: { _all: true },
+      orderBy: { localCodigo: 'asc' },
+      take: 300,
+    });
+    if (grupos.length > 0) {
+      return grupos.map((g) => ({ localCodigo: g.localCodigo, local: g.local, itens: g._count._all, ignorado: ignorados.has(g.localCodigo) }));
+    }
+  }
+  const unico = /^\d+$/.test(termo) ? await getLocalSankhya(termo).catch(() => null) : null;
+  return unico ? [{ localCodigo: unico.localCodigo, local: unico.local, itens: 0, ignorado: ignorados.has(unico.localCodigo) }] : [];
 }

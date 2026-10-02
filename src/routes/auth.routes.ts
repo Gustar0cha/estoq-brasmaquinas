@@ -1,3 +1,4 @@
+import { registrarLog } from '../lib/logAcao';
 import { Router } from 'express';
 import { z } from 'zod';
 
@@ -19,6 +20,7 @@ authRouter.post('/login', async (req, res) => {
 
   try {
     const resultado = await authService.login(parse.data.login, parse.data.senha);
+    void registrarLog(resultado.usuario.id, 'LOGIN', `Entrou no sistema (${req.headers['user-agent']?.includes('okhttp') ? 'celular' : 'painel'}).`);
     res.json(resultado);
   } catch (error) {
     res.status(401).json({ erro: error instanceof Error ? error.message : 'Não foi possível entrar.' });

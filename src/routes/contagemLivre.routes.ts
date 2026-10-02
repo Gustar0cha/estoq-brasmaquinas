@@ -21,7 +21,7 @@ function responderErro(res: Response, erro: unknown) {
     const status =
       erro.codigo === 'NAO_ENCONTRADA' ? 404
       : erro.codigo === 'NAO_AUTORIZADO' ? 403
-      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA'].includes(erro.codigo) ? 409
+      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS'].includes(erro.codigo) ? 409
       : 400;
     res.status(status).json({ erro: erro.message, codigo: erro.codigo, ...(erro.detalhes ?? {}) });
     return;
@@ -120,6 +120,28 @@ contagemLivreRouter.get('/registros/:registroId/foto', autenticar, exigirAdmin, 
 
 // ---- Gestor --------------------------------------------------------------
 
+// Quarentena: tudo o que já foi movido, de todas as contagens.
+const periodo = (req: Request) => {
+  const de = typeof req.query.de === 'string' ? new Date(req.query.de) : undefined;
+  const ate = typeof req.query.ate === 'string' ? new Date(req.query.ate) : undefined;
+  return {
+    de: de && !Number.isNaN(de.getTime()) ? de : undefined,
+    ate: ate && !Number.isNaN(ate.getTime()) ? ate : undefined,
+    contagemId: typeof req.query.contagemId === 'string' ? req.query.contagemId : undefined,
+  };
+};
+
+contagemLivreRouter.get('/quarentena', autenticar, exigirAdmin, rota(async (req, res) => {
+  res.json(await servico.listarQuarentena(periodo(req)));
+}));
+
+contagemLivreRouter.get('/quarentena.xlsx', autenticar, exigirAdmin, rota(async (req, res) => {
+  const buffer = await servico.gerarQuarentenaXlsx(periodo(req));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="quarentena.xlsx"');
+  res.send(Buffer.from(buffer as ArrayBuffer));
+}));
+
 contagemLivreRouter.get('/copias', autenticar, exigirAdmin, rota(async (_req, res) => {
   res.json(await servico.listarCopiasDisponiveis());
 }));
@@ -150,11 +172,11 @@ const atualizarSchema = z.object({
 });
 
 contagemLivreRouter.patch('/:id', autenticar, exigirAdmin, rota(async (req, res) => {
-  res.json(await servico.atualizarContagemLivre(param(req, 'id'), atualizarSchema.parse(req.body)));
+  res.json(await servico.atualizarContagemLivre(param(req, 'id'), atualizarSchema.parse(req.body), usuarioId(req)));
 }));
 
 contagemLivreRouter.post('/:id/encerrar', autenticar, exigirAdmin, rota(async (req, res) => {
-  res.json(await servico.encerrarContagemLivre(param(req, 'id')));
+  res.json(await servico.encerrarContagemLivre(param(req, 'id'), usuarioId(req)));
 }));
 
 contagemLivreRouter.post('/:id/preparar', autenticar, exigirAdmin, rota(async (req, res) => {
@@ -162,7 +184,9 @@ contagemLivreRouter.post('/:id/preparar', autenticar, exigirAdmin, rota(async (r
 }));
 
 contagemLivreRouter.delete('/:id', autenticar, exigirAdmin, rota(async (req, res) => {
-  await servico.excluirContagemLivre(param(req, 'id'));
+  // ?forcar=true apaga junto tudo que foi contado — o painel só manda depois
+  // de a pessoa digitar o nome da contagem.
+  await servico.excluirContagemLivre(param(req, 'id'), usuarioId(req), req.query.forcar === 'true');
   res.status(204).end();
 }));
 
@@ -195,6 +219,21 @@ contagemLivreRouter.post('/:id/recontagens', autenticar, exigirAdmin, rota(async
       solicitadaPorId: usuarioId(req),
     })
   );
+}));
+
+contagemLivreRouter.post('/:id/quarentena', autenticar, exigirAdmin, rota(async (req, res) => {
+  const dados = z
+    .object({ itens: z.array(itemSchema).min(1).max(2000), observacao: z.string().max(300).optional() })
+    .parse(req.body);
+  res.json(await servico.moverParaQuarentena({ contagemId: param(req, 'id'), ...dados, usuarioId: usuarioId(req) }));
+}));
+
+contagemLivreRouter.get('/:id/dashboard', autenticar, exigirAdmin, rota(async (req, res) => {
+  res.json(await servico.dashboardContagemLivre(param(req, 'id')));
+}));
+
+contagemLivreRouter.get('/:id/dashboard-quarentena', autenticar, exigirAdmin, rota(async (req, res) => {
+  res.json(await servico.dashboardQuarentena(param(req, 'id')));
 }));
 
 contagemLivreRouter.post('/:id/recontagens/cancelar', autenticar, exigirAdmin, rota(async (req, res) => {

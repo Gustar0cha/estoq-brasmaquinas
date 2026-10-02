@@ -13,8 +13,9 @@ export const CAPACIDADES_FLUXO_LIVRE = {
 
 // `contagemPorCopia` diz ao app que a contagem contra a cópia de estoque
 // (/contagem-livre) está pronta. Depende de DUAS coisas que chegam separadas:
-// o código (deploy) e as tabelas (migração 20261001000000_contagem_livre, que
-// o deploy não aplica sozinho). Anunciar só pelo código faria o celular abrir
+// o código (deploy) e as tabelas (migrações 20261001000000_contagem_livre e
+// 20261002000000_logs_quarentena_locais, que o deploy não aplica sozinho).
+// Confere a tabela MAIS NOVA que o código usa a cada bipe: o dono do item. Anunciar só pelo código faria o celular abrir
 // a tela nova contra tabelas que não existem. Então pergunta ao banco.
 let tabelasProntas = false;
 let conferidoEm = 0;
@@ -23,7 +24,7 @@ export async function contagemPorCopiaDisponivel(): Promise<boolean> {
   conferidoEm = Date.now();
   try {
     const [linha] = await prisma.$queryRaw<{ ok: boolean }[]>`
-      SELECT to_regclass('public.contagem_livre_registros') IS NOT NULL AS ok`;
+      SELECT to_regclass('public.contagem_livre_item_donos') IS NOT NULL AS ok`;
     tabelasProntas = Boolean(linha?.ok);
   } catch {
     tabelasProntas = false;

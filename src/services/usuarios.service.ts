@@ -115,6 +115,16 @@ export async function atualizarUsuario(id: string, input: AtualizarUsuarioInput)
 // verdade e desativar: quem já contou alguma coisa não pode sumir sem levar o
 // histórico junto.
 export async function vinculosDoUsuario(id: string): Promise<number> {
+  // A contagem livre também prende o login: apagar quem registrou, criou
+  // contagem, ignorou local ou mandou pra quarentena quebraria o relatório.
+  const livre = await Promise.all([
+    prisma.contagemLivreRegistro.count({ where: { usuarioId: id } }),
+    prisma.contagemLivreSessao.count({ where: { usuarioId: id } }),
+    prisma.contagemLivre.count({ where: { criadaPorId: id } }),
+    prisma.contagemLivreRecontagem.count({ where: { solicitadaPorId: id } }),
+    prisma.contagemLivreQuarentena.count({ where: { usuarioId: id } }),
+    prisma.localIgnorado.count({ where: { criadoPorId: id } }),
+  ]).then((n) => n.reduce((a, b) => a + b, 0));
   const [contagens, conferencias, atribuicoes, tarefas, responsavel] = await Promise.all([
     prisma.contagemItem.count({
       where: { OR: [{ atribuidoParaId: id }, { conferidoPorId: id }, { iniciadoPorId: id }] },
@@ -124,7 +134,7 @@ export async function vinculosDoUsuario(id: string): Promise<number> {
     prisma.tarefa.count({ where: { criadaPorId: id } }),
     prisma.tarefaResponsavel.count({ where: { usuarioId: id } }),
   ]);
-  return contagens + conferencias + atribuicoes + tarefas + responsavel;
+  return contagens + conferencias + atribuicoes + tarefas + responsavel + livre;
 }
 
 export async function apagarUsuario(id: string): Promise<{ apagado: boolean; vinculos: number }> {
