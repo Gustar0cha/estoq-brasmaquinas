@@ -1,6 +1,12 @@
 import { executarQuery } from './gateway';
 import { FILTRO_SQL_SEM_QUARENTENA } from './client';
 
+// O que da quarentena entra no retrato: nada (padrão), tudo, ou SÓ ela — pra
+// completar o retrato de uma contagem que ligou a quarentena depois de criada.
+export type RetratoQuarentena = 'SEM' | 'TODOS' | 'SO';
+
+const FILTRO_SQL_SO_QUARENTENA = `UPPER(NVL(LOC.DESCRLOCAL, ' ')) LIKE '%QUARENTENA%'`;
+
 // A cópia de estoque do Sankhya (TGFCTE) — a base da contagem livre.
 //
 // Medido na produção em 01/10/2026: sai uma cópia por dia e por empresa, com
@@ -79,9 +85,16 @@ function listaEmpresas(empresas: string[]): string {
 // Todas as linhas da cópia pras empresas escolhidas. Paginado de 5000 em
 // 5000 porque é o teto do gateway — passar disso volta truncado, sem erro.
 //
-// Fica de fora o que está em área de quarentena: produto em quarentena não
+// Por padrão fica de fora o que está em área de quarentena (ver
+// ContagemLivre.incluirQuarentena): produto em quarentena não
 // entra em contagem (mesma regra do resto do sistema).
-export async function getRetratoCopia(dataCopia: string, empresas: string[]): Promise<LinhaRetratoCopia[]> {
+export async function getRetratoCopia(
+  dataCopia: string,
+  empresas: string[],
+  quarentena: RetratoQuarentena = 'SEM'
+): Promise<LinhaRetratoCopia[]> {
+  const filtroQuarentena =
+    quarentena === 'SEM' ? `AND ${FILTRO_SQL_SEM_QUARENTENA}` : quarentena === 'SO' ? `AND ${FILTRO_SQL_SO_QUARENTENA}` : '';
   const data = dataOracle(dataCopia);
   const emp = listaEmpresas(empresas);
   const todas: LinhaRetratoCopia[] = [];
@@ -110,7 +123,7 @@ export async function getRetratoCopia(dataCopia: string, empresas: string[]): Pr
       LEFT JOIN TGFLOC LOC ON LOC.CODLOCAL = CTE.CODLOCAL
       WHERE CTE.DTCONTAGEM = ${data}
         AND CTE.CODEMP IN (${emp})
-        AND ${FILTRO_SQL_SEM_QUARENTENA}
+        ${filtroQuarentena}
       GROUP BY CTE.CODEMP, CTE.CODLOCAL, CTE.CODPROD
       ORDER BY CTE.CODEMP, CTE.CODLOCAL, CTE.CODPROD
       OFFSET ${offset} ROWS FETCH NEXT 5000 ROWS ONLY

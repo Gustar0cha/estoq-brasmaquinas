@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import compression from 'compression';
 import cors from 'cors';
 import express from 'express';
 
@@ -45,11 +46,29 @@ app.use(
 );
 app.use(express.json());
 
+// Compressão (gzip) de tudo que sai: JSON e o próprio painel. Sem ela o painel
+// baixava 2,4 MB de JavaScript a cada abertura e o relatório de uma contagem
+// grande ia inteiro (1,5 MB em 10/10/2026, a caminho de ~9 MB no fim do
+// inventário) a cada minuto, por aba aberta. Comprimidos: 620 KB e 180 KB.
+// Foto não entra — JPEG já é comprimido, e a imagem não ganharia nada.
+app.use(
+  compression({
+    filter: (req, res) => !String(res.getHeader('Content-Type') ?? '').startsWith('image/') && compression.filter(req, res),
+  })
+);
+
 // Painel web (build estático do mesmo app Expo) servido pelo próprio backend,
 // no mesmo domínio da API — o que torna as chamadas do painel same-origin.
 // Gerado com `npm run build:painel` no repositório do app.
 const PASTA_PAINEL = path.resolve(__dirname, '..', 'public', 'painel');
 
+// Os arquivos de _expo/static têm o hash do conteúdo no nome: um build novo
+// gera nomes novos, então o navegador pode guardá-los pra sempre. O
+// index.html continua sem cache, e é ele que aponta pros nomes da vez.
+app.use(
+  '/painel/_expo/static',
+  express.static(path.join(PASTA_PAINEL, '_expo', 'static'), { immutable: true, maxAge: '365d' })
+);
 app.use('/painel', express.static(PASTA_PAINEL));
 // SPA: qualquer rota interna (/painel/admin/relatorios) devolve o index.html
 // e o roteamento acontece no navegador. Usa `use` em vez de um curinga de

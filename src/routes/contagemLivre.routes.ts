@@ -157,6 +157,7 @@ const criarSchema = z.object({
   fotoObrigatoria: z.boolean().optional(),
   travaLocal: z.boolean().optional(),
   travaDuplicada: z.boolean().optional(),
+  incluirQuarentena: z.boolean().optional(),
 });
 
 contagemLivreRouter.post('/', autenticar, exigirAdmin, rota(async (req, res) => {
@@ -169,6 +170,7 @@ const atualizarSchema = z.object({
   fotoObrigatoria: z.boolean().optional(),
   travaLocal: z.boolean().optional(),
   travaDuplicada: z.boolean().optional(),
+  incluirQuarentena: z.boolean().optional(),
 });
 
 contagemLivreRouter.patch('/:id', autenticar, exigirAdmin, rota(async (req, res) => {

@@ -115,6 +115,7 @@ export interface ContagemLivreDTO {
   fotoObrigatoria: boolean;
   travaLocal: boolean;
   travaDuplicada: boolean;
+  incluirQuarentena: boolean;
   criadaEm: string;
   encerradaEm: string | null;
 }
@@ -147,6 +148,7 @@ function montarContagem(c: LinhaContagem): ContagemLivreDTO {
     fotoObrigatoria: c.fotoObrigatoria,
     travaLocal: c.travaLocal,
     travaDuplicada: c.travaDuplicada,
+    incluirQuarentena: c.incluirQuarentena,
     criadaEm: c.criadaEm.toISOString(),
     encerradaEm: c.encerradaEm?.toISOString() ?? null,
   };
@@ -238,6 +240,7 @@ export interface CriarContagemLivreInput {
   fotoObrigatoria?: boolean;
   travaLocal?: boolean;
   travaDuplicada?: boolean;
+  incluirQuarentena?: boolean;
   usuarioId: string;
 }
 
@@ -275,6 +278,7 @@ export async function criarContagemLivre(input: CriarContagemLivreInput): Promis
       fotoObrigatoria: input.fotoObrigatoria ?? true,
       travaLocal: input.travaLocal ?? true,
       travaDuplicada: input.travaDuplicada ?? true,
+      incluirQuarentena: input.incluirQuarentena ?? false,
       criadaPorId: input.usuarioId,
     },
   });
@@ -287,6 +291,7 @@ export async function criarContagemLivre(input: CriarContagemLivreInput): Promis
     fotoObrigatoria: criada.fotoObrigatoria,
     travaLocal: criada.travaLocal,
     travaDuplicada: criada.travaDuplicada,
+    incluirQuarentena: criada.incluirQuarentena,
   });
   return montarContagem(criada);
 }
@@ -302,29 +307,9 @@ export async function prepararRetrato(contagemId: string): Promise<void> {
 
     // Em sequência, não em paralelo: rajada de consultas é o que faz o
     // gateway do Sankhya responder "Não autorizado".
-    const linhas = await getRetratoCopia(dataCopia, contagem.empresas);
+    const linhas = await getRetratoCopia(dataCopia, contagem.empresas, contagem.incluirQuarentena ? 'TODOS' : 'SEM');
     if (linhas.length === 0) throw new Error('A cópia escolhida não tem itens para essas lojas.');
-    const custos = await getCustosDaCopia(dataCopia, contagem.empresas);
-    const reservas = await getReservadosSankhya();
-
-    const LOTE = 2000;
-    for (let i = 0; i < linhas.length; i += LOTE) {
-      await prisma.contagemLivreEstoque.createMany({
-        data: linhas.slice(i, i + LOTE).map((l) => ({
-          contagemId,
-          empresaCodigo: l.empresaCodigo,
-          codigoProduto: l.codigoProduto,
-          descricao: l.descricao,
-          unidade: l.unidade,
-          localCodigo: l.localCodigo,
-          local: l.local,
-          quantidadeTotal: l.quantidadeTotal,
-          quantidadeReservada: reservas.get(chaveReserva(l.codigoProduto, l.localCodigo, l.empresaCodigo)) ?? 0,
-          custoSemIcms: custos.get(`${l.codigoProduto}|${l.empresaCodigo}`) ?? null,
-        })),
-        skipDuplicates: true,
-      });
-    }
+    await gravarNoRetrato(contagemId, dataCopia, contagem.empresas, linhas);
 
     await prisma.contagemLivre.updateMany({
       where: { id: contagemId, status: { in: ['PREPARANDO', 'ERRO'] } },
@@ -339,6 +324,66 @@ export async function prepararRetrato(contagemId: string): Promise<void> {
       })
       .catch(() => undefined);
   }
+}
+
+async function gravarNoRetrato(
+  contagemId: string,
+  dataCopia: string,
+  empresas: string[],
+  linhas: Awaited<ReturnType<typeof getRetratoCopia>>
+) {
+  const custos = await getCustosDaCopia(dataCopia, empresas);
+  const reservas = await getReservadosSankhya();
+  const LOTE = 2000;
+  for (let i = 0; i < linhas.length; i += LOTE) {
+    await prisma.contagemLivreEstoque.createMany({
+      data: linhas.slice(i, i + LOTE).map((l) => ({
+        contagemId,
+        empresaCodigo: l.empresaCodigo,
+        codigoProduto: l.codigoProduto,
+        descricao: l.descricao,
+        unidade: l.unidade,
+        localCodigo: l.localCodigo,
+        local: l.local,
+        quantidadeTotal: l.quantidadeTotal,
+        quantidadeReservada: reservas.get(chaveReserva(l.codigoProduto, l.localCodigo, l.empresaCodigo)) ?? 0,
+        custoSemIcms: custos.get(`${l.codigoProduto}|${l.empresaCodigo}`) ?? null,
+      })),
+      skipDuplicates: true,
+    });
+  }
+}
+
+// Ligar a quarentena numa contagem que nasceu sem ela: o retrato não tem os
+// itens das áreas de quarentena, e sem eles o celular abriria o local e
+// acusaria todo produto como "fora do local". Busca SÓ a quarentena daquela
+// cópia e acrescenta. Uma vez acrescentados, ficam — desligar de novo só os
+// esconde (ver quarentenaVisivel).
+const completando = new Set<string>();
+async function completarQuarentena(contagemId: string): Promise<void> {
+  if (completando.has(contagemId)) return;
+  completando.add(contagemId);
+  try {
+    const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
+    if (!contagem || !contagem.incluirQuarentena) return;
+    const ja = await prisma.contagemLivreEstoque.count({
+      where: { contagemId, local: { contains: 'QUARENTENA', mode: 'insensitive' } },
+    });
+    if (ja > 0) return;
+    const dataCopia = dataCopiaParaSankhya(contagem.dataCopia);
+    const linhas = await getRetratoCopia(dataCopia, contagem.empresas, 'SO');
+    if (linhas.length > 0) await gravarNoRetrato(contagemId, dataCopia, contagem.empresas, linhas);
+    esquecerRelatorio(contagemId);
+  } catch (erro) {
+    console.warn('[contagem-livre] não completou a quarentena', contagemId, erro instanceof Error ? erro.message : erro);
+  } finally {
+    completando.delete(contagemId);
+  }
+}
+
+// Um item do retrato vale pra contagem? Quarentena só quando a contagem a inclui.
+function quarentenaVisivel(contagem: { incluirQuarentena: boolean }, local: string): boolean {
+  return contagem.incluirQuarentena || !ehLocalDeQuarentena(local);
 }
 
 export async function tentarPrepararDeNovo(contagemId: string): Promise<ContagemLivreDTO> {
@@ -411,11 +456,12 @@ const NOME_CONFIG = {
   fotoObrigatoria: 'a foto obrigatória',
   travaLocal: 'a trava de local',
   travaDuplicada: 'a trava de duplicidade',
+  incluirQuarentena: 'a contagem da área de quarentena',
 } as const;
 
 export async function atualizarContagemLivre(
   contagemId: string,
-  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean },
+  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean; incluirQuarentena?: boolean },
   usuarioId: string
 ): Promise<ContagemLivreDTO> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
@@ -429,8 +475,13 @@ export async function atualizarContagemLivre(
       ...(dados.fotoObrigatoria !== undefined ? { fotoObrigatoria: dados.fotoObrigatoria } : {}),
       ...(dados.travaLocal !== undefined ? { travaLocal: dados.travaLocal } : {}),
       ...(dados.travaDuplicada !== undefined ? { travaDuplicada: dados.travaDuplicada } : {}),
+      ...(dados.incluirQuarentena !== undefined ? { incluirQuarentena: dados.incluirQuarentena } : {}),
     },
   });
+  if (dados.incluirQuarentena !== undefined && dados.incluirQuarentena !== c.incluirQuarentena) {
+    esquecerRelatorio(contagemId);
+    if (dados.incluirQuarentena && atualizada.status === 'ATIVA') void completarQuarentena(contagemId);
+  }
   // Uma linha por mudança: "desligou a trava de local" é o que se procura no log.
   for (const campo of Object.keys(NOME_CONFIG) as (keyof typeof NOME_CONFIG)[]) {
     if (dados[campo] !== undefined && dados[campo] !== c[campo]) {
@@ -461,6 +512,7 @@ export async function encerrarContagemLivre(contagemId: string, usuarioId: strin
     where: { id: contagemId },
     data: { status: 'ENCERRADA', encerradaEm: agora },
   });
+  esquecerRelatorio(contagemId);
   void registrarLog(usuarioId, 'CONTAGEM_ENCERRADA', `Encerrou a contagem "${c.nome}".`, { contagemId });
   return montarContagem(encerrada);
 }
@@ -477,6 +529,7 @@ export async function excluirContagemLivre(contagemId: string, usuarioId: string
     throw new ErroContagemLivre(`Essa contagem tem ${registros.length} itens contados. Confirme a exclusão com os dados.`, 'TEM_REGISTROS');
   }
   await prisma.contagemLivre.delete({ where: { id: contagemId } });
+  esquecerRelatorio(contagemId);
   for (const r of registros) {
     if (r.fotoChave) await removerFotoContagem(r.fotoChave).catch(() => undefined);
   }
@@ -743,8 +796,11 @@ export async function abrirLocal(input: {
     empresa = empresaDaFilial(filialDoLocal(codigo));
   }
 
-  if (ehLocalDeQuarentena(nomeLocal)) {
-    throw new ErroContagemLivre(`${nomeLocal} é área de quarentena — não entra na contagem.`, 'QUARENTENA');
+  if (ehLocalDeQuarentena(nomeLocal) && !contagem.incluirQuarentena) {
+    throw new ErroContagemLivre(
+      `${nomeLocal} é área de quarentena, e esta contagem não inclui a quarentena. O gestor libera no painel, em Contagem → "Contar área de quarentena".`,
+      'QUARENTENA'
+    );
   }
   if (empresa && !contagem.empresas.includes(empresa)) {
     throw new ErroContagemLivre(`${nomeLocal} é de ${nomeEmpresa(empresa)}, que não está nesta contagem.`, 'OUTRA_LOJA');
@@ -1184,6 +1240,7 @@ export async function apagarRegistro(usuarioId: string, registroId: string): Pro
 
   await prisma.contagemLivreRegistro.delete({ where: { id: registro.id } });
   if (registro.fotoChave) await removerFotoContagem(registro.fotoChave).catch(() => undefined);
+  esquecerRelatorio(registro.contagemId);
 
   // Sem mais nenhum registro daquele item, ele perde o dono e volta a poder
   // ser contado por qualquer um.
@@ -1326,6 +1383,7 @@ export async function pedirRecontagem(input: {
     });
     pedidas += 1;
   }
+  if (pedidas > 0) esquecerRelatorio(contagem.id);
   if (pedidas > 0) {
     const para = input.atribuidaParaId
       ? (await prisma.usuario.findUnique({ where: { id: input.atribuidaParaId }, select: { nome: true } }))?.nome
@@ -1347,6 +1405,7 @@ export async function cancelarRecontagem(input: {
   await prisma.contagemLivreRecontagem.deleteMany({
     where: { ...input, concluidaEm: null },
   });
+  esquecerRelatorio(input.contagemId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1394,13 +1453,52 @@ export interface LinhaRelatorioLivre {
   registros: { id: string; numeroContagem: number; usuario: string; quantidade: number }[];
 }
 
-export async function relatorioContagemLivre(
+// Painel, TV e várias abas abertas na mesma contagem pediam o relatório cada
+// um por conta própria — e o painel do ciclo também o monta, a cada 30 s.
+// Num inventário grande ele chega a ~11 mil linhas. Agora quem pede dentro de
+// 10 s recebe o mesmo, e pedidos simultâneos esperam a MESMA montagem.
+//
+// Registrar não limpa o cache: os números da equipe podem atrasar até 10 s
+// no painel. Ação do gestor (quarentena, excluir, recontagem, locais
+// ignorados, configuração) limpa, porque ele espera ver o resultado na hora.
+const CACHE_MS = 10_000;
+type Relatorio = { contagem: ContagemLivreDTO; linhas: LinhaRelatorioLivre[] };
+const cacheRelatorio = new Map<string, { em: number; valor: Promise<Relatorio> }>();
+const cacheDashboard = new Map<string, { em: number; valor: Promise<unknown> }>();
+
+export function esquecerRelatorio(contagemId?: string) {
+  if (contagemId) {
+    cacheRelatorio.delete(contagemId);
+    cacheDashboard.delete(contagemId);
+  } else {
+    cacheRelatorio.clear();
+    cacheDashboard.clear();
+  }
+}
+
+function lembrar<T>(cache: Map<string, { em: number; valor: Promise<unknown> }>, chave: string, montar: () => Promise<T>): Promise<T> {
+  const guardado = cache.get(chave);
+  if (guardado && Date.now() - guardado.em < CACHE_MS) return guardado.valor as Promise<T>;
+  const valor = montar();
+  cache.set(chave, { em: Date.now(), valor });
+  // Erro não fica guardado: o próximo pedido tenta de novo.
+  valor.catch(() => {
+    if (cache.get(chave)?.valor === valor) cache.delete(chave);
+  });
+  return valor;
+}
+
+export function relatorioContagemLivre(contagemId: string): Promise<Relatorio> {
+  return lembrar(cacheRelatorio, contagemId, () => montarRelatorio(contagemId));
+}
+
+async function montarRelatorio(
   contagemId: string
 ): Promise<{ contagem: ContagemLivreDTO; linhas: LinhaRelatorioLivre[] }> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [estoque, registros, finalizadas, recontagens, quarentenas, ignorados] = await Promise.all([
+  const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados] = await Promise.all([
     prisma.contagemLivreEstoque.findMany({
       where: { contagemId },
       select: {
@@ -1422,6 +1520,9 @@ export async function relatorioContagemLivre(
     prisma.contagemLivreQuarentena.findMany({ where: { contagemId }, include: { usuario: { select: { nome: true } } } }),
     codigosIgnorados(),
   ]);
+  // Quarentena desligada: os itens dela (que só existem no retrato se a opção
+  // já esteve ligada) não geram "não contado". O que foi contado lá continua.
+  const estoque = estoqueTodo.filter((e) => quarentenaVisivel(contagem, e.local));
 
   const chaveDe = (p: string, l: string, e: string) => `${p}|${l}|${e}`;
   const porChave = new Map(estoque.map((e) => [chaveDe(e.codigoProduto, e.localCodigo, e.empresaCodigo), e]));
@@ -1537,7 +1638,7 @@ const formatoHora = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
 
 export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: ExcelJS.Buffer; nomeArquivo: string }> {
-  const { contagem, linhas } = await relatorioContagemLivre(contagemId);
+  const { contagem, linhas } = await montarRelatorio(contagemId);
 
   const workbook = new ExcelJS.Workbook();
   const planilha = workbook.addWorksheet('Contagem');
@@ -1639,7 +1740,9 @@ export async function moverParaQuarentena(input: {
   usuarioId: string;
   observacao?: string;
 }): Promise<{ movidos: number; ignorados: string[] }> {
-  const { contagem, linhas } = await relatorioContagemLivre(input.contagemId);
+  // Fresco, nunca do cache: conferir se o item já está em quarentena com um
+  // dado de 10 s atrás deixaria mover o mesmo item duas vezes.
+  const { contagem, linhas } = await montarRelatorio(input.contagemId);
   const porChave = new Map(linhas.map((l) => [l.chave, l]));
   const ignorados: string[] = [];
   const movidos: LinhaRelatorioLivre[] = [];
@@ -1679,6 +1782,7 @@ export async function moverParaQuarentena(input: {
     movidos.push(l);
   }
 
+  if (movidos.length > 0) esquecerRelatorio(contagem.id);
   if (movidos.length > 0) {
     void registrarLog(
       input.usuarioId,
@@ -1792,11 +1896,15 @@ export async function gerarQuarentenaXlsx(filtro: { de?: Date; ate?: Date; conta
 // O formato é o mesmo DashboardContagem que o modo TV já desenha, pra os
 // gráficos e o mapa do armazém continuarem os mesmos.
 
-export async function dashboardContagemLivre(contagemId: string) {
+export function dashboardContagemLivre(contagemId: string) {
+  return lembrar(cacheDashboard, contagemId, () => montarDashboard(contagemId));
+}
+
+async function montarDashboard(contagemId: string) {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [{ linhas }, estoque, ignorados, sessoesAbertas, registros, outras] = await Promise.all([
+  const [{ linhas }, estoqueTodo, ignorados, sessoesAbertas, registros, outras] = await Promise.all([
     relatorioContagemLivre(contagemId),
     prisma.contagemLivreEstoque.findMany({
       where: { contagemId, quantidadeTotal: { gt: 0 } },
@@ -1811,6 +1919,7 @@ export async function dashboardContagemLivre(contagemId: string) {
     prisma.contagemLivre.findMany({ where: { status: 'ATIVA', id: { not: contagemId } }, orderBy: { criadaEm: 'desc' } }),
   ]);
 
+  const estoque = estoqueTodo.filter((e) => quarentenaVisivel(contagem, e.local));
   const chave = (p: string, l: string, e: string) => `${p}|${l}|${e}`;
   const linhaDe = new Map(linhas.map((l) => [l.chave, l]));
   const universo = estoque.filter((e) => !ignorados.has(e.localCodigo));
@@ -2030,6 +2139,7 @@ export async function ignorarLocais(locais: { localCodigo: string; local: string
     if (r.criadoPorId === usuarioId && Date.now() - r.criadoEm.getTime() < 5000) novos += 1;
   }
   esquecerIgnorados();
+  esquecerRelatorio();
   void registrarLog(usuarioId, 'LOCAL_IGNORADO', locais.length === 1 ? `Passou a ignorar o local ${locais[0].local}.` : `Passou a ignorar ${locais.length} locais.`, {
     locais: locais.map((l) => l.localCodigo),
     motivo,
@@ -2042,6 +2152,7 @@ export async function reativarLocal(localCodigo: string, usuarioId: string) {
   if (!l) return;
   await prisma.localIgnorado.delete({ where: { localCodigo } });
   esquecerIgnorados();
+  esquecerRelatorio();
   void registrarLog(usuarioId, 'LOCAL_REATIVADO', `Voltou a considerar o local ${l.local}.`, { localCodigo });
 }
 

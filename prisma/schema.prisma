@@ -610,6 +610,11 @@ model ContagemLivre {
   fotoObrigatoria Boolean @default(true)
   travaLocal      Boolean @default(true)
   travaDuplicada  Boolean @default(true)
+  //   incluirQuarentena — a área de quarentena entra na contagem: o local
+  //                     abre no celular e os itens dela entram no retrato,
+  //                     no progresso e na acuracidade. Desligada (padrão),
+  //                     quarentena fica de fora, como sempre foi.
+  incluirQuarentena Boolean @default(false)
 
   criadaPor   Usuario   @relation("ContagemLivreCriadaPor", fields: [criadaPorId], references: [id])
   criadaPorId String
