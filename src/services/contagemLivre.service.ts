@@ -681,6 +681,9 @@ export interface EstadoColaboradorDTO {
   }[];
   sessao: SessaoLivreDTO | null;
   recontagens: { contagemId: string; localCodigo: string; local: string; itens: number }[];
+  // Último local que a pessoa finalizou: depois de sair (inatividade, troca de
+  // aparelho) ela sabe onde parou. Chamado #302.
+  ultimoLocal: { contagemId: string; local: string; numeroContagem: number; finalizadoEm: string; registros: number } | null;
 }
 
 export async function estadoDoColaborador(usuarioId: string): Promise<EstadoColaboradorDTO> {
@@ -724,6 +727,14 @@ export async function estadoDoColaborador(usuarioId: string): Promise<EstadoCola
 
   const contagemDaSessao = aberta ? contagens.find((c) => c.id === aberta.contagemId)! : null;
 
+  const ultima = ids.length
+    ? await prisma.contagemLivreSessao.findFirst({
+        where: { usuarioId: usuario.id, finalizadaEm: { not: null }, contagemId: { in: ids } },
+        orderBy: { finalizadaEm: 'desc' },
+        include: { _count: { select: { registros: true } } },
+      })
+    : null;
+
   return {
     contagens: contagens.map((c) => ({
       id: c.id,
@@ -735,6 +746,15 @@ export async function estadoDoColaborador(usuarioId: string): Promise<EstadoCola
     })),
     sessao: aberta && contagemDaSessao ? await montarSessao(aberta, contagemDaSessao, usuario) : null,
     recontagens: [...porLocal.values()].sort((a, b) => a.local.localeCompare(b.local, 'pt-BR', { numeric: true })),
+    ultimoLocal: ultima?.finalizadaEm
+      ? {
+          contagemId: ultima.contagemId,
+          local: ultima.local,
+          numeroContagem: ultima.numeroContagem,
+          finalizadoEm: ultima.finalizadaEm.toISOString(),
+          registros: ultima._count.registros,
+        }
+      : null,
   };
 }
 
