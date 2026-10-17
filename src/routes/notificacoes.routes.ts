@@ -7,7 +7,7 @@ import * as notificacaoService from '../services/notificacao.service';
 export const notificacoesRouter = Router();
 
 notificacoesRouter.get('/', autenticar, async (req, res) => {
-  res.json(await notificacaoService.getNotificacoes(req.usuario!.sub, req.usuario!.role === 'ADMIN'));
+  res.json(await notificacaoService.getNotificacoes(req.usuario!.sub, ['ADMIN', 'GESTOR'].includes(req.usuario!.role)));
 });
 
 notificacoesRouter.patch('/:id/lida', autenticar, async (req, res) => {

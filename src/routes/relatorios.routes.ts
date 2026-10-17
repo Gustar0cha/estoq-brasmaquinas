@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { autenticar, exigirAdmin } from '../middleware/auth';
+import { autenticar, exigirGestor } from '../middleware/auth';
 import {
   gerarRelatorioContagemExcel,
   gerarRelatorioExcel,
@@ -13,7 +13,7 @@ import { TipoMovimentacaoSankhya } from '../sankhya/types';
 
 export const relatoriosRouter = Router();
 
-relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req, res) => {
+relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirGestor, async (req, res) => {
   const { dataInicio, dataFim, empresaCodigo, tipo, status, atribuidoPara, somenteDivergencias, incluirFotos } =
     req.query;
 
@@ -43,7 +43,7 @@ relatoriosRouter.get('/movimentacoes.xlsx', autenticar, exigirAdmin, async (req,
   }
 });
 
-relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res) => {
+relatoriosRouter.get('/contagem/xlsx', autenticar, exigirGestor, async (req, res) => {
   const { tarefaIds, dataInicio, dataFim, somenteDivergencias, incluirFotos, cicloId } = req.query;
 
   try {
@@ -71,7 +71,7 @@ relatoriosRouter.get('/contagem/xlsx', autenticar, exigirAdmin, async (req, res)
   }
 });
 
-relatoriosRouter.get('/sistema-vs-contado/xlsx', autenticar, exigirAdmin, async (req, res) => {
+relatoriosRouter.get('/sistema-vs-contado/xlsx', autenticar, exigirGestor, async (req, res) => {
   const { dataInicio, dataFim } = req.query;
 
   try {
@@ -91,7 +91,7 @@ relatoriosRouter.get('/sistema-vs-contado/xlsx', autenticar, exigirAdmin, async 
 
 // Uma contagem contra a anterior: o "versus" que antes dependia de alguém
 // lembrar as datas exatas de cada inventário.
-relatoriosRouter.get('/comparativo-ciclos/xlsx', autenticar, exigirAdmin, async (req, res) => {
+relatoriosRouter.get('/comparativo-ciclos/xlsx', autenticar, exigirGestor, async (req, res) => {
   const { cicloAtualId, cicloAnteriorId, somenteMudancas } = req.query;
 
   if (typeof cicloAtualId !== 'string' || typeof cicloAnteriorId !== 'string') {
@@ -120,7 +120,7 @@ relatoriosRouter.get('/comparativo-ciclos/xlsx', autenticar, exigirAdmin, async 
 });
 
 // Produto espalhado na mesma rua: uma linha por endereço, pra filtrar no Excel.
-relatoriosRouter.get('/espalhados/xlsx', autenticar, exigirAdmin, async (req, res) => {
+relatoriosRouter.get('/espalhados/xlsx', autenticar, exigirGestor, async (req, res) => {
   const { cicloId } = req.query;
 
   try {

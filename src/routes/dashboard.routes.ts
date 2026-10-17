@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { autenticar, exigirAdmin } from '../middleware/auth';
+import { autenticar, exigirLeitura } from '../middleware/auth';
 import { getDashboardContagem, getDashboardQuarentena } from '../services/dashboard.service';
 
 export const dashboardRouter = Router();
@@ -26,7 +26,7 @@ const filtroSchema = z.object({
     .transform((v) => (v ? v.split(',').filter(Boolean) : undefined)),
 });
 
-dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
+dashboardRouter.get('/contagem', autenticar, exigirLeitura, async (req, res) => {
   const parse = filtroSchema.safeParse(req.query);
   if (!parse.success) {
     res.status(400).json({ erro: 'Filtro inválido para o dashboard.' });
@@ -36,6 +36,6 @@ dashboardRouter.get('/contagem', autenticar, exigirAdmin, async (req, res) => {
   res.json(await getDashboardContagem(parse.data));
 });
 
-dashboardRouter.get('/quarentena', autenticar, exigirAdmin, async (_req, res) => {
+dashboardRouter.get('/quarentena', autenticar, exigirLeitura, async (_req, res) => {
   res.json(await getDashboardQuarentena());
 });

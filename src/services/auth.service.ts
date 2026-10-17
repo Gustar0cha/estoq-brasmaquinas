@@ -1,10 +1,11 @@
+import { PapelUsuario } from '../generated/prisma/client';
 import { assinarToken } from '../lib/jwt';
 import { prisma } from '../lib/prisma';
 import { conferirHash } from '../lib/senha';
 
 export interface LoginResultado {
   token: string;
-  usuario: { id: string; nome: string; login: string; role: 'ADMIN' | 'OPERADOR'; filial: string | null };
+  usuario: { id: string; nome: string; login: string; role: PapelUsuario; filial: string | null };
 }
 
 export async function login(login: string, senha: string): Promise<LoginResultado> {

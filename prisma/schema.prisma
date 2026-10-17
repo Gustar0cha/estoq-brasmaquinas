@@ -10,9 +10,17 @@ datasource db {
   provider = "postgresql"
 }
 
+// Níveis de acesso (chamado #303). OPERADOR é o "Contador" nas telas: o
+// nome do valor ficou para não mexer nos logins e tokens que já existem.
+//   ADMIN        tudo
+//   GESTOR       KPIs e relatórios, pede recontagem, autoriza reabrir local
+//   OPERADOR     registra contagem no celular
+//   VISUALIZADOR só vê os KPIs
 enum PapelUsuario {
   ADMIN
   OPERADOR
+  GESTOR
+  VISUALIZADOR
 }
 
 // Usuários do app (login/senha próprios, independentes do Sankhya).
@@ -64,6 +72,8 @@ model Usuario {
   logsAcoes                  LogAcao[]
   locaisIgnorados            LocalIgnorado[]
   quarentenasMovidas         ContagemLivreQuarentena[]
+  reaberturasPedidas         ContagemLivreReabertura[] @relation("ReaberturaPedidaPor")
+  reaberturasDecididas       ContagemLivreReabertura[] @relation("ReaberturaDecididaPor")
 
   @@map("usuarios")
 }
@@ -627,6 +637,7 @@ model ContagemLivre {
   recontagens ContagemLivreRecontagem[]
   donos       ContagemLivreItemDono[]
   quarentenas ContagemLivreQuarentena[]
+  reaberturas ContagemLivreReabertura[]
 
   @@index([status])
   @@map("contagem_livre")
@@ -820,4 +831,41 @@ model LogAcao {
   @@index([acao])
   @@index([usuarioId])
   @@map("logs_acoes")
+}
+
+enum StatusReabertura {
+  PENDENTE
+  AUTORIZADA
+  RECUSADA
+  // A autorização já abriu o local uma vez: não vale de novo.
+  USADA
+}
+
+// Local finalizado só reabre com autorização do gestor ou do administrador,
+// com motivo (chamado #303). O contador bipa a etiqueta, o pedido nasce aqui,
+// o gestor decide no painel, e o próximo bipe do contador abre o local.
+model ContagemLivreReabertura {
+  id            String           @id @default(uuid())
+  contagem      ContagemLivre    @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId    String
+  localCodigo   String
+  local         String
+  status        StatusReabertura @default(PENDENTE)
+  solicitante   Usuario          @relation("ReaberturaPedidaPor", fields: [solicitanteId], references: [id])
+  solicitanteId String
+  solicitadaEm  DateTime         @default(now())
+  // Quem e quando tinha finalizado o local, pra quem decide saber o que está
+  // reabrindo.
+  finalizadoPor String
+  finalizadoEm  DateTime
+  motivo        String?
+  decididaPor   Usuario?         @relation("ReaberturaDecididaPor", fields: [decididaPorId], references: [id])
+  decididaPorId String?
+  decididaEm    DateTime?
+  usadaEm       DateTime?
+  sessaoId      String?
+
+  @@index([contagemId, localCodigo, solicitanteId])
+  @@index([status])
+  @@map("contagem_livre_reaberturas")
 }

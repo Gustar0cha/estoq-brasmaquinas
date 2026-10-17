@@ -2,7 +2,7 @@ import { Request, Response, Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
 
-import { autenticar, exigirAdmin } from '../middleware/auth';
+import { autenticar, exigirAdmin, exigirContador, exigirGestor, exigirLeitura } from '../middleware/auth';
 import * as servico from '../services/contagemLivre.service';
 import { ErroContagemLivre } from '../services/contagemLivre.service';
 
@@ -21,7 +21,7 @@ function responderErro(res: Response, erro: unknown) {
     const status =
       erro.codigo === 'NAO_ENCONTRADA' ? 404
       : erro.codigo === 'NAO_AUTORIZADO' ? 403
-      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS'].includes(erro.codigo) ? 409
+      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS', 'REABERTURA_PENDENTE', 'JA_DECIDIDA'].includes(erro.codigo) ? 409
       : 400;
     res.status(status).json({ erro: erro.message, codigo: erro.codigo, ...(erro.detalhes ?? {}) });
     return;
@@ -55,7 +55,7 @@ const booleano = z
 
 // ---- Colaborador ---------------------------------------------------------
 
-contagemLivreRouter.get('/estado', autenticar, rota(async (req, res) => {
+contagemLivreRouter.get('/estado', autenticar, exigirContador, rota(async (req, res) => {
   res.json(await servico.estadoDoColaborador(usuarioId(req)));
 }));
 
@@ -64,7 +64,7 @@ contagemLivreRouter.get('/em-uso', autenticar, rota(async (_req, res) => {
   res.json(await servico.copiasEmUso());
 }));
 
-contagemLivreRouter.get('/sessoes/:sessaoId', autenticar, rota(async (req, res) => {
+contagemLivreRouter.get('/sessoes/:sessaoId', autenticar, exigirContador, rota(async (req, res) => {
   res.json(await servico.getSessao(usuarioId(req), param(req, 'sessaoId')));
 }));
 
@@ -74,7 +74,7 @@ const conferirSchema = z.object({
   confirmarForaDoLocal: booleano,
 });
 
-contagemLivreRouter.post('/sessoes/:sessaoId/produto', autenticar, rota(async (req, res) => {
+contagemLivreRouter.post('/sessoes/:sessaoId/produto', autenticar, exigirContador, rota(async (req, res) => {
   const dados = conferirSchema.parse(req.body);
   res.json(await servico.conferirProduto({ usuarioId: usuarioId(req), sessaoId: param(req, 'sessaoId'), ...dados }));
 }));
@@ -87,7 +87,7 @@ const registrarSchema = z.object({
   confirmarForaDoLocal: booleano,
 });
 
-contagemLivreRouter.post('/sessoes/:sessaoId/registros', autenticar, upload.single('foto'), rota(async (req, res) => {
+contagemLivreRouter.post('/sessoes/:sessaoId/registros', autenticar, exigirContador, upload.single('foto'), rota(async (req, res) => {
   const dados = registrarSchema.parse(req.body);
   const registro = await servico.registrar({
     usuarioId: usuarioId(req),
@@ -98,17 +98,17 @@ contagemLivreRouter.post('/sessoes/:sessaoId/registros', autenticar, upload.sing
   res.status(201).json(registro);
 }));
 
-contagemLivreRouter.post('/sessoes/:sessaoId/finalizar', autenticar, rota(async (req, res) => {
+contagemLivreRouter.post('/sessoes/:sessaoId/finalizar', autenticar, exigirContador, rota(async (req, res) => {
   res.json(await servico.finalizarLocal(usuarioId(req), param(req, 'sessaoId')));
 }));
 
-contagemLivreRouter.delete('/registros/:registroId', autenticar, rota(async (req, res) => {
+contagemLivreRouter.delete('/registros/:registroId', autenticar, exigirContador, rota(async (req, res) => {
   await servico.apagarRegistro(usuarioId(req), param(req, 'registroId'));
   res.status(204).end();
 }));
 
 // Nunca expõe o MinIO: o binário passa por aqui, e só pro gestor.
-contagemLivreRouter.get('/registros/:registroId/foto', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/registros/:registroId/foto', autenticar, exigirGestor, rota(async (req, res) => {
   const stream = await servico.fotoDoRegistro(param(req, 'registroId'));
   if (!stream) {
     res.status(404).json({ erro: 'Foto não encontrada.' });
@@ -131,22 +131,40 @@ const periodo = (req: Request) => {
   };
 };
 
-contagemLivreRouter.get('/quarentena', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/quarentena', autenticar, exigirGestor, rota(async (req, res) => {
   res.json(await servico.listarQuarentena(periodo(req)));
 }));
 
-contagemLivreRouter.get('/quarentena.xlsx', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/quarentena.xlsx', autenticar, exigirGestor, rota(async (req, res) => {
   const buffer = await servico.gerarQuarentenaXlsx(periodo(req));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="quarentena.xlsx"');
   res.send(Buffer.from(buffer as ArrayBuffer));
 }));
 
+// ---- Reabertura de local finalizado (chamado #303) ------------------------
+
+contagemLivreRouter.get('/reaberturas', autenticar, exigirGestor, rota(async (req, res) => {
+  res.json(await servico.listarReaberturas(req.query.todas === 'true'));
+}));
+
+const decisaoSchema = z.object({ motivo: z.string().trim().max(300).optional() });
+
+contagemLivreRouter.post('/reaberturas/:reaberturaId/autorizar', autenticar, exigirGestor, rota(async (req, res) => {
+  const { motivo } = decisaoSchema.parse(req.body);
+  res.json(await servico.decidirReabertura({ reaberturaId: param(req, 'reaberturaId'), usuarioId: usuarioId(req), autorizar: true, motivo }));
+}));
+
+contagemLivreRouter.post('/reaberturas/:reaberturaId/recusar', autenticar, exigirGestor, rota(async (req, res) => {
+  const { motivo } = decisaoSchema.parse(req.body);
+  res.json(await servico.decidirReabertura({ reaberturaId: param(req, 'reaberturaId'), usuarioId: usuarioId(req), autorizar: false, motivo }));
+}));
+
 contagemLivreRouter.get('/copias', autenticar, exigirAdmin, rota(async (_req, res) => {
   res.json(await servico.listarCopiasDisponiveis());
 }));
 
-contagemLivreRouter.get('/', autenticar, exigirAdmin, rota(async (_req, res) => {
+contagemLivreRouter.get('/', autenticar, exigirLeitura, rota(async (_req, res) => {
   res.json(await servico.listarContagensLivres());
 }));
 
@@ -192,11 +210,11 @@ contagemLivreRouter.delete('/:id', autenticar, exigirAdmin, rota(async (req, res
   res.status(204).end();
 }));
 
-contagemLivreRouter.get('/:id/relatorio', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/:id/relatorio', autenticar, exigirGestor, rota(async (req, res) => {
   res.json(await servico.relatorioContagemLivre(param(req, 'id')));
 }));
 
-contagemLivreRouter.get('/:id/relatorio.xlsx', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/:id/relatorio.xlsx', autenticar, exigirGestor, rota(async (req, res) => {
   const { buffer, nomeArquivo } = await servico.gerarRelatorioXlsx(param(req, 'id'));
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
@@ -209,7 +227,7 @@ const itemSchema = z.object({
   empresaCodigo: z.string().min(1),
 });
 
-contagemLivreRouter.post('/:id/recontagens', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.post('/:id/recontagens', autenticar, exigirGestor, rota(async (req, res) => {
   const dados = z
     .object({ itens: z.array(itemSchema).min(1).max(2000), atribuidaParaId: z.string().nullable().optional() })
     .parse(req.body);
@@ -230,15 +248,15 @@ contagemLivreRouter.post('/:id/quarentena', autenticar, exigirAdmin, rota(async 
   res.json(await servico.moverParaQuarentena({ contagemId: param(req, 'id'), ...dados, usuarioId: usuarioId(req) }));
 }));
 
-contagemLivreRouter.get('/:id/dashboard', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/:id/dashboard', autenticar, exigirLeitura, rota(async (req, res) => {
   res.json(await servico.dashboardContagemLivre(param(req, 'id')));
 }));
 
-contagemLivreRouter.get('/:id/dashboard-quarentena', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.get('/:id/dashboard-quarentena', autenticar, exigirLeitura, rota(async (req, res) => {
   res.json(await servico.dashboardQuarentena(param(req, 'id')));
 }));
 
-contagemLivreRouter.post('/:id/recontagens/cancelar', autenticar, exigirAdmin, rota(async (req, res) => {
+contagemLivreRouter.post('/:id/recontagens/cancelar', autenticar, exigirGestor, rota(async (req, res) => {
   await servico.cancelarRecontagem({ contagemId: param(req, 'id'), ...itemSchema.parse(req.body) });
   res.status(204).end();
 }));
@@ -250,11 +268,11 @@ const abrirSchema = z.object({
   finalizarAberta: z.boolean().optional(),
 });
 
-contagemLivreRouter.post('/:id/locais', autenticar, rota(async (req, res) => {
+contagemLivreRouter.post('/:id/locais', autenticar, exigirContador, rota(async (req, res) => {
   const dados = abrirSchema.parse(req.body);
   res.status(201).json(await servico.abrirLocal({ usuarioId: usuarioId(req), contagemId: param(req, 'id'), ...dados }));
 }));
 
-contagemLivreRouter.get('/:id/meus-registros', autenticar, rota(async (req, res) => {
+contagemLivreRouter.get('/:id/meus-registros', autenticar, exigirContador, rota(async (req, res) => {
   res.json(await servico.meusRegistros(usuarioId(req), param(req, 'id')));
 }));

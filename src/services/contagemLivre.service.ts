@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 
 import { empresaDaFilial, filialDoLocal, labelFilial, localVisivelPara } from '../lib/filiais';
 import { registrarLog } from '../lib/logAcao';
+import { nomePapel } from '../lib/papeis';
 import { validarFotoContagem } from '../lib/fotoContagem';
 import { obterFotoStream, removerFotoContagem, uploadFotoContagem } from '../lib/minio';
 import { prisma } from '../lib/prisma';
@@ -14,6 +15,7 @@ import {
 import { getCustosDaCopia, getLocalSankhya, getRetratoCopia, listarCopiasEstoque } from '../sankhya/copiaEstoque';
 import { parsearLocalizacao } from '../sankhya/localizacao';
 import { resolverProdutoDoBipe } from './contagem.service';
+import { criarNotificacao, notificarUsuario } from './notificacao.service';
 
 // Contagem livre (01/10/2026).
 //
@@ -832,10 +834,15 @@ export async function abrirLocal(input: {
   // Um local aberto por vez. É o "Finalizar" que fecha o local, e é por ele
   // que o relatório sabe quais locais foram varridos de verdade.
   const aberta = await prisma.contagemLivreSessao.findFirst({ where: { usuarioId: usuario.id, finalizadaEm: null } });
+  if (aberta && aberta.contagemId === contagem.id && aberta.localCodigo === codigo && aberta.numeroContagem === numero) {
+    return montarSessao(aberta, contagem, usuario);
+  }
+
+  // Antes de finalizar o local que a pessoa tem aberto: barrada aqui, ela
+  // continua onde estava.
+  const autorizacao = numero === 1 ? await autorizacaoParaReabrir(usuario, contagem, codigo, nomeLocal) : null;
+
   if (aberta) {
-    if (aberta.contagemId === contagem.id && aberta.localCodigo === codigo && aberta.numeroContagem === numero) {
-      return montarSessao(aberta, contagem, usuario);
-    }
     if (!input.finalizarAberta) {
       throw new ErroContagemLivre(`Você ainda está em ${aberta.local}. Finalize esse local antes de abrir outro.`, 'SESSAO_ABERTA', {
         sessaoId: aberta.id,
@@ -855,15 +862,159 @@ export async function abrirLocal(input: {
       usuarioId: usuario.id,
     },
   });
-  void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
+  if (autorizacao) {
+    await prisma.contagemLivreReabertura.update({ where: { id: autorizacao.id }, data: { status: 'USADA', usadaEm: new Date(), sessaoId: sessao.id } });
+    void registrarLog(usuario.id, 'LOCAL_REABERTO', `Reabriu ${nomeLocal} em "${contagem.nome}", autorizado por ${autorizacao.decididaPor?.nome ?? '—'}: ${autorizacao.motivo ?? ''}`, {
+      contagemId: contagem.id,
+      localCodigo: codigo,
+      reaberturaId: autorizacao.id,
+    });
+  } else {
+    void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
+  }
   return montarSessao(sessao, contagem, usuario);
+}
+
+// Local finalizado só reabre com autorização (chamado #303). "Finalizado" é:
+// alguém finalizou a 1ª contagem dele e ninguém mais está contando ali agora
+// — duas pessoas dividindo um local grande continuam podendo entrar nele.
+//
+// Sem autorização, o pedido vai pro gestor (um por pessoa e local) e o bipe
+// é recusado. Com ela, devolve a autorização, que abrirLocal marca como usada.
+async function autorizacaoParaReabrir(usuario: Usuario, contagem: { id: string; nome: string }, codigo: string, nomeLocal: string) {
+  const finalizada = await prisma.contagemLivreSessao.findFirst({
+    where: { contagemId: contagem.id, localCodigo: codigo, numeroContagem: 1, finalizadaEm: { not: null } },
+    orderBy: { finalizadaEm: 'desc' },
+    include: { usuario: { select: { nome: true } } },
+  });
+  if (!finalizada?.finalizadaEm) return null;
+  const alguemContando = await prisma.contagemLivreSessao.findFirst({
+    where: { contagemId: contagem.id, localCodigo: codigo, numeroContagem: 1, finalizadaEm: null, usuarioId: { not: usuario.id } },
+    select: { id: true },
+  });
+  if (alguemContando) return null;
+
+  const pedidos = await prisma.contagemLivreReabertura.findMany({
+    where: { contagemId: contagem.id, localCodigo: codigo, solicitanteId: usuario.id, status: { in: ['PENDENTE', 'AUTORIZADA'] } },
+    include: { decididaPor: { select: { nome: true } } },
+    orderBy: { solicitadaEm: 'desc' },
+  });
+  const autorizada = pedidos.find((p) => p.status === 'AUTORIZADA');
+  if (autorizada) return autorizada;
+
+  const quando = `${finalizada.finalizadaEm.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo' })} às ${finalizada.finalizadaEm.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
+  if (pedidos.length === 0) {
+    const pedido = await prisma.contagemLivreReabertura.create({
+      data: {
+        contagemId: contagem.id,
+        localCodigo: codigo,
+        local: nomeLocal,
+        solicitanteId: usuario.id,
+        finalizadoPor: finalizada.usuario.nome,
+        finalizadoEm: finalizada.finalizadaEm,
+      },
+    });
+    void registrarLog(usuario.id, 'REABERTURA_PEDIDA', `Pediu para reabrir ${nomeLocal} em "${contagem.nome}" (finalizado por ${finalizada.usuario.nome} em ${quando}).`, {
+      contagemId: contagem.id,
+      localCodigo: codigo,
+      reaberturaId: pedido.id,
+    });
+    void criarNotificacao('REABERTURA_PEDIDA', `reabertura:${pedido.id}`, 'Pedido para reabrir local', `${usuario.nome} pediu para reabrir ${nomeLocal}. Autorize ou recuse no painel, em Contagem.`).catch(() => {});
+  }
+  throw new ErroContagemLivre(
+    `${nomeLocal} foi finalizado por ${finalizada.usuario.nome} em ${quando}. Solicite autorização ao gestor: o pedido já foi enviado para o painel. Quando ele autorizar, bipe a etiqueta de novo.`,
+    'REABERTURA_PENDENTE'
+  );
+}
+
+export interface ReaberturaDTO {
+  id: string;
+  contagemId: string;
+  contagem: string;
+  localCodigo: string;
+  local: string;
+  status: 'PENDENTE' | 'AUTORIZADA' | 'RECUSADA' | 'USADA';
+  solicitante: string;
+  solicitadaEm: string;
+  finalizadoPor: string;
+  finalizadoEm: string;
+  motivo: string | null;
+  decididaPor: string | null;
+  decididaEm: string | null;
+  usadaEm: string | null;
+}
+
+// Pendentes primeiro; com `todas`, também o histórico (últimas 200).
+export async function listarReaberturas(todas: boolean): Promise<ReaberturaDTO[]> {
+  const lista = await prisma.contagemLivreReabertura.findMany({
+    where: todas ? {} : { status: 'PENDENTE' },
+    include: {
+      contagem: { select: { nome: true } },
+      solicitante: { select: { nome: true } },
+      decididaPor: { select: { nome: true } },
+    },
+    orderBy: { solicitadaEm: 'desc' },
+    take: 200,
+  });
+  return lista.map((r) => ({
+    id: r.id,
+    contagemId: r.contagemId,
+    contagem: r.contagem.nome,
+    localCodigo: r.localCodigo,
+    local: r.local,
+    status: r.status,
+    solicitante: r.solicitante.nome,
+    solicitadaEm: r.solicitadaEm.toISOString(),
+    finalizadoPor: r.finalizadoPor,
+    finalizadoEm: r.finalizadoEm.toISOString(),
+    motivo: r.motivo,
+    decididaPor: r.decididaPor?.nome ?? null,
+    decididaEm: r.decididaEm?.toISOString() ?? null,
+    usadaEm: r.usadaEm?.toISOString() ?? null,
+  }));
+}
+
+// Autorizar exige motivo ("item encontrado depois"); recusar, não. Fica
+// gravado quem decidiu e quando, no pedido e no log.
+export async function decidirReabertura(input: { reaberturaId: string; usuarioId: string; autorizar: boolean; motivo?: string }): Promise<ReaberturaDTO> {
+  const quem = await prisma.usuario.findUniqueOrThrow({ where: { id: input.usuarioId } });
+  const motivo = input.motivo?.trim() ?? '';
+  if (input.autorizar && motivo.length < 5) {
+    throw new ErroContagemLivre('Informe o motivo da reabertura (por exemplo, "item encontrado depois").', 'MOTIVO_OBRIGATORIO');
+  }
+  const pedido = await prisma.contagemLivreReabertura.findUnique({ where: { id: input.reaberturaId }, include: { contagem: { select: { nome: true } } } });
+  if (!pedido) throw new ErroContagemLivre('Pedido não encontrado.', 'NAO_ENCONTRADA');
+  // A condição no update evita duas decisões ao mesmo tempo no mesmo pedido.
+  const { count } = await prisma.contagemLivreReabertura.updateMany({
+    where: { id: pedido.id, status: 'PENDENTE' },
+    data: { status: input.autorizar ? 'AUTORIZADA' : 'RECUSADA', motivo: motivo || null, decididaPorId: quem.id, decididaEm: new Date() },
+  });
+  if (count === 0) throw new ErroContagemLivre('Esse pedido já foi decidido.', 'JA_DECIDIDA');
+
+  void registrarLog(
+    quem.id,
+    input.autorizar ? 'REABERTURA_AUTORIZADA' : 'REABERTURA_RECUSADA',
+    `${input.autorizar ? 'Autorizou' : 'Recusou'} reabrir ${pedido.local} em "${pedido.contagem.nome}" (${nomePapel(quem.role)})${motivo ? `: ${motivo}` : ''}.`,
+    { contagemId: pedido.contagemId, localCodigo: pedido.localCodigo, reaberturaId: pedido.id }
+  );
+  void notificarUsuario(
+    'REABERTURA_DECIDIDA',
+    `reabertura:${pedido.id}`,
+    input.autorizar ? 'Reabertura autorizada' : 'Reabertura recusada',
+    input.autorizar
+      ? `${quem.nome} autorizou reabrir ${pedido.local}. Bipe a etiqueta do local para continuar.`
+      : `${quem.nome} não autorizou reabrir ${pedido.local}${motivo ? `: ${motivo}` : '.'}`,
+    pedido.solicitanteId
+  ).catch(() => {});
+
+  return (await listarReaberturas(true)).find((r) => r.id === pedido.id)!;
 }
 
 async function sessaoAbertaDe(usuario: Usuario, sessaoId: string) {
   const sessao = await prisma.contagemLivreSessao.findUnique({ where: { id: sessaoId } });
   if (!sessao || sessao.usuarioId !== usuario.id) throw new ErroContagemLivre('Local não encontrado.', 'NAO_ENCONTRADA');
   if (sessao.finalizadaEm) {
-    throw new ErroContagemLivre('Esse local já foi finalizado. Bipe a etiqueta de novo pra reabrir.', 'SESSAO_FINALIZADA');
+    throw new ErroContagemLivre('Esse local já foi finalizado. Para continuar nele, bipe a etiqueta: reabrir pede autorização do gestor.', 'SESSAO_FINALIZADA');
   }
   const contagem = await contagemAtivaVisivel(usuario, sessao.contagemId);
   return { sessao, contagem };

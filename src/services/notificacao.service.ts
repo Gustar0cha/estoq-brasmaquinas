@@ -21,6 +21,7 @@ export const TIPOS_NOTIFICACAO: { tipo: string; label: string }[] = [
   { tipo: 'INICIO_SEGUNDA_CONTAGEM', label: 'Início de recontagem' },
   { tipo: 'CONTAGEM_APAGADA', label: 'Contagem apagada pelo administrador' },
   { tipo: 'PRODUTO_NEGATIVADO', label: 'Produto com estoque negativo' },
+  { tipo: 'REABERTURA_PEDIDA', label: 'Pedido para reabrir local finalizado' },
 ];
 
 // Central de criação de notificações — todo lugar do backend que precisa
