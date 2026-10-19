@@ -20,8 +20,8 @@ function responderErro(res: Response, erro: unknown) {
   if (erro instanceof ErroContagemLivre) {
     const status =
       erro.codigo === 'NAO_ENCONTRADA' ? 404
-      : erro.codigo === 'NAO_AUTORIZADO' ? 403
-      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS', 'REABERTURA_PENDENTE', 'JA_DECIDIDA'].includes(erro.codigo) ? 409
+      : erro.codigo === 'NAO_AUTORIZADO' || erro.codigo === 'LIBERACAO_RECUSADA' ? 403
+      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS', 'REABERTURA_PENDENTE', 'JA_DECIDIDA', 'LOCAL_OCUPADO'].includes(erro.codigo) ? 409
       : 400;
     res.status(status).json({ erro: erro.message, codigo: erro.codigo, ...(erro.detalhes ?? {}) });
     return;
@@ -85,7 +85,18 @@ const registrarSchema = z.object({
   codigoBipado: z.string().trim().max(80).optional(),
   iniciadoEm: z.string().max(40).optional(),
   confirmarForaDoLocal: booleano,
+  liberacao: z.string().max(2000).optional(),
 });
+
+contagemLivreRouter.post('/sessoes/:sessaoId/autorizar-fora-do-local', autenticar, exigirContador, rota(async (req, res) => {
+  const dados = z.object({ codigoProduto: z.string().trim().min(1).max(20), login: z.string().trim().min(1).max(80), senha: z.string().min(1).max(200) }).parse(req.body);
+  res.json(await servico.autorizarForaDoLocal({ usuarioId: usuarioId(req), sessaoId: param(req, 'sessaoId'), ...dados }));
+}));
+
+contagemLivreRouter.post('/registros/:registroId/confirmar', autenticar, exigirContador, rota(async (req, res) => {
+  await servico.confirmarDivergencia(usuarioId(req), param(req, 'registroId'));
+  res.status(204).end();
+}));
 
 contagemLivreRouter.post('/sessoes/:sessaoId/registros', autenticar, exigirContador, upload.single('foto'), rota(async (req, res) => {
   const dados = registrarSchema.parse(req.body);
@@ -143,6 +154,15 @@ contagemLivreRouter.get('/quarentena.xlsx', autenticar, exigirGestor, rota(async
 }));
 
 // ---- Reabertura de local finalizado (chamado #303) ------------------------
+
+contagemLivreRouter.get('/locais-abertos', autenticar, exigirGestor, rota(async (_req, res) => {
+  res.json(await servico.locaisAbertos());
+}));
+
+contagemLivreRouter.post('/sessoes/:sessaoId/liberar', autenticar, exigirGestor, rota(async (req, res) => {
+  await servico.liberarLocal(usuarioId(req), param(req, 'sessaoId'));
+  res.status(204).end();
+}));
 
 contagemLivreRouter.get('/reaberturas', autenticar, exigirGestor, rota(async (req, res) => {
   res.json(await servico.listarReaberturas(req.query.todas === 'true'));

@@ -723,6 +723,8 @@ model ContagemLivreRegistro {
   // libera a repetição sem mudar o esquema — e ligada, nem dois celulares
   // registrando no mesmo instante conseguem furar.
   chaveUnica     String?             @unique
+  // Fora do local com a trava ligada: nome do gestor que liberou com a senha.
+  foraDoLocalAutorizadoPor String?
 
   @@index([contagemId, codigoProduto, localCodigo])
   @@index([sessaoId])

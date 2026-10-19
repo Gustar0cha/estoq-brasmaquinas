@@ -1,7 +1,11 @@
 import ExcelJS from 'exceljs';
 
 import { empresaDaFilial, filialDoLocal, labelFilial, localVisivelPara } from '../lib/filiais';
+import jwt from 'jsonwebtoken';
+
+import { env } from '../lib/env';
 import { registrarLog } from '../lib/logAcao';
+import { conferirHash } from '../lib/senha';
 import { nomePapel } from '../lib/papeis';
 import { validarFotoContagem } from '../lib/fotoContagem';
 import { obterFotoStream, removerFotoContagem, uploadFotoContagem } from '../lib/minio';
@@ -838,6 +842,10 @@ export async function abrirLocal(input: {
     return montarSessao(aberta, contagem, usuario);
   }
 
+  // Um local, uma pessoa (pedido de 17/10): quem bipa um local aberto por
+  // outro fica sabendo quem está lá, e a tentativa vai pro log.
+  await barrarSeOcupado(usuario, contagem, codigo, nomeLocal);
+
   // Antes de finalizar o local que a pessoa tem aberto: barrada aqui, ela
   // continua onde estava.
   const autorizacao = numero === 1 ? await autorizacaoParaReabrir(usuario, contagem, codigo, nomeLocal) : null;
@@ -862,6 +870,17 @@ export async function abrirLocal(input: {
       usuarioId: usuario.id,
     },
   });
+  // Dois bipes no mesmo instante passam juntos pela conferência acima. Quem
+  // abriu primeiro fica; o outro desfaz e recebe o mesmo aviso.
+  const primeiraAberta = await prisma.contagemLivreSessao.findFirst({
+    where: { contagemId: contagem.id, localCodigo: codigo, finalizadaEm: null },
+    orderBy: [{ iniciadaEm: 'asc' }, { id: 'asc' }],
+  });
+  if (primeiraAberta && primeiraAberta.id !== sessao.id && primeiraAberta.usuarioId !== usuario.id) {
+    await prisma.contagemLivreSessao.delete({ where: { id: sessao.id } });
+    await barrarSeOcupado(usuario, contagem, codigo, nomeLocal);
+  }
+
   if (autorizacao) {
     await prisma.contagemLivreReabertura.update({ where: { id: autorizacao.id }, data: { status: 'USADA', usadaEm: new Date(), sessaoId: sessao.id } });
     void registrarLog(usuario.id, 'LOCAL_REABERTO', `Reabriu ${nomeLocal} em "${contagem.nome}", autorizado por ${autorizacao.decididaPor?.nome ?? '—'}: ${autorizacao.motivo ?? ''}`, {
@@ -873,6 +892,118 @@ export async function abrirLocal(input: {
     void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
   }
   return montarSessao(sessao, contagem, usuario);
+}
+
+async function barrarSeOcupado(usuario: Usuario, contagem: { id: string; nome: string }, codigo: string, nomeLocal: string) {
+  const ocupada = await prisma.contagemLivreSessao.findFirst({
+    where: { contagemId: contagem.id, localCodigo: codigo, finalizadaEm: null, usuarioId: { not: usuario.id } },
+    orderBy: { iniciadaEm: 'asc' },
+    include: { usuario: { select: { nome: true } } },
+  });
+  if (!ocupada) return;
+  void registrarLog(usuario.id, 'LOCAL_OCUPADO', `Tentou abrir ${nomeLocal} em "${contagem.nome}", aberto por ${ocupada.usuario.nome} desde ${quando(ocupada.iniciadaEm)}.`, {
+    contagemId: contagem.id,
+    localCodigo: codigo,
+    sessaoId: ocupada.id,
+  });
+  throw new ErroContagemLivre(
+    `${nomeLocal} está aberto por ${ocupada.usuario.nome} desde ${quando(ocupada.iniciadaEm)}. Só uma pessoa conta cada local: espere ele finalizar ou peça ao gestor para liberar.`,
+    'LOCAL_OCUPADO',
+    { usuario: ocupada.usuario.nome }
+  );
+}
+
+// Locais abertos agora, pro gestor ver quem está onde e liberar o que ficou
+// preso (celular sem bateria, pessoa que foi embora sem finalizar).
+export async function locaisAbertos(): Promise<{ sessaoId: string; contagemId: string; contagem: string; localCodigo: string; local: string; usuario: string; numeroContagem: number; iniciadaEm: string; registros: number; ultimoRegistro: string | null }[]> {
+  const abertas = await prisma.contagemLivreSessao.findMany({
+    where: { finalizadaEm: null, contagem: { status: 'ATIVA' } },
+    include: {
+      usuario: { select: { nome: true } },
+      contagem: { select: { nome: true } },
+      registros: { select: { registradoEm: true }, orderBy: { registradoEm: 'desc' }, take: 1 },
+      _count: { select: { registros: true } },
+    },
+    orderBy: { iniciadaEm: 'asc' },
+  });
+  return abertas.map((a) => ({
+    sessaoId: a.id,
+    contagemId: a.contagemId,
+    contagem: a.contagem.nome,
+    localCodigo: a.localCodigo,
+    local: a.local,
+    usuario: a.usuario.nome,
+    numeroContagem: a.numeroContagem,
+    iniciadaEm: a.iniciadaEm.toISOString(),
+    registros: a._count.registros,
+    ultimoRegistro: a.registros[0]?.registradoEm.toISOString() ?? null,
+  }));
+}
+
+// O gestor finaliza o local de outra pessoa. O que ela contou fica; o
+// local passa a "finalizado" (reabrir pede autorização, como sempre).
+export async function liberarLocal(gestorId: string, sessaoId: string) {
+  const gestor = await prisma.usuario.findUniqueOrThrow({ where: { id: gestorId } });
+  const sessao = await prisma.contagemLivreSessao.findUnique({ where: { id: sessaoId }, include: { usuario: { select: { nome: true } }, contagem: { select: { nome: true } } } });
+  if (!sessao) throw new ErroContagemLivre('Local não encontrado.', 'NAO_ENCONTRADA');
+  if (sessao.finalizadaEm) return;
+  await prisma.contagemLivreSessao.update({ where: { id: sessao.id }, data: { finalizadaEm: new Date() } });
+  esquecerRelatorio(sessao.contagemId);
+  void registrarLog(gestor.id, 'LOCAL_LIBERADO', `Finalizou ${sessao.local} de ${sessao.usuario.nome} em "${sessao.contagem.nome}" (${nomePapel(gestor.role)}).`, {
+    contagemId: sessao.contagemId,
+    localCodigo: sessao.localCodigo,
+    sessaoId: sessao.id,
+  });
+  void notificarUsuario('LOCAL_LIBERADO', `sessao:${sessao.id}`, 'Local finalizado pelo gestor', `${gestor.nome} finalizou ${sessao.local}. O que você contou lá continua salvo.`, sessao.usuarioId).catch(() => {});
+}
+
+// ---- Fora do local com a senha do gestor -----------------------------------
+//
+// Com a trava de local ligada, produto que a cópia não tem no local só é
+// registrado se um gestor (ou administrador) digitar login e senha no
+// celular de quem conta. A liberação vale 15 minutos, pra aquele local e
+// aquele produto, e fica no registro e no log.
+
+const VALIDADE_LIBERACAO = '15m';
+
+export async function autorizarForaDoLocal(input: { usuarioId: string; sessaoId: string; codigoProduto: string; login: string; senha: string }) {
+  const usuario = await usuarioAtivo(input.usuarioId);
+  const { sessao, contagem } = await sessaoAbertaDe(usuario, input.sessaoId);
+  const gestor = await prisma.usuario.findUnique({ where: { login: input.login.trim() } });
+  const valido = gestor && gestor.ativo && (await conferirHash(input.senha, gestor.senhaHash));
+  if (!gestor || !valido || (gestor.role !== 'ADMIN' && gestor.role !== 'GESTOR')) {
+    void registrarLog(usuario.id, 'FORA_DO_LOCAL_RECUSADO', `Liberação de produto fora do local recusada em ${sessao.local} (login "${input.login.trim()}").`, {
+      contagemId: contagem.id,
+      localCodigo: sessao.localCodigo,
+      codigoProduto: input.codigoProduto,
+    });
+    throw new ErroContagemLivre(
+      !gestor || !valido ? 'Login ou senha do gestor não conferem.' : 'Esse login não pode liberar: precisa ser gestor ou administrador.',
+      'LIBERACAO_RECUSADA'
+    );
+  }
+  void registrarLog(gestor.id, 'FORA_DO_LOCAL_AUTORIZADO', `Liberou ${usuario.nome} a registrar o produto ${input.codigoProduto} fora do local em ${sessao.local} (${nomePapel(gestor.role)}).`, {
+    contagemId: contagem.id,
+    localCodigo: sessao.localCodigo,
+    codigoProduto: input.codigoProduto,
+    contadorId: usuario.id,
+  });
+  const liberacao = jwt.sign(
+    { tipo: 'fora-do-local', sessaoId: sessao.id, codigoProduto: input.codigoProduto, gestorId: gestor.id, gestor: gestor.nome },
+    env.jwtSecret,
+    { expiresIn: VALIDADE_LIBERACAO }
+  );
+  return { liberacao, gestor: gestor.nome };
+}
+
+function lerLiberacao(token: string | undefined, sessaoId: string, codigoProduto: string): string | null {
+  if (!token) return null;
+  try {
+    const p = jwt.verify(token, env.jwtSecret) as { tipo?: string; sessaoId?: string; codigoProduto?: string; gestor?: string };
+    return p.tipo === 'fora-do-local' && p.sessaoId === sessaoId && p.codigoProduto === codigoProduto ? p.gestor ?? 'gestor' : null;
+  } catch {
+    return null;
+  }
 }
 
 // Local finalizado só reabre com autorização (chamado #303). "Finalizado" é:
@@ -1125,7 +1256,7 @@ async function conferir(
   usuario: Usuario,
   sessao: LinhaSessao,
   contagem: LinhaContagem,
-  input: { codigo?: string; codigoProduto?: string; confirmarForaDoLocal?: boolean }
+  input: { codigo?: string; codigoProduto?: string; confirmarForaDoLocal?: boolean; liberacao?: string }
 ): Promise<ConferenciaProdutoDTO> {
   let candidatos: Candidato[];
   if (input.codigoProduto?.trim()) {
@@ -1214,11 +1345,12 @@ async function conferir(
   const produto = await comEmpresa(escolhidos[0]);
   const foraDoLocal = !empresaNoLocal.has(produto.codigoProduto);
 
-  if (foraDoLocal && contagem.travaLocal && !input.confirmarForaDoLocal) {
+  // Trava de local ligada: fora do local só com a senha do gestor.
+  if (foraDoLocal && contagem.travaLocal && !lerLiberacao(input.liberacao, sessao.id, produto.codigoProduto)) {
     return {
       status: 'FORA_DO_LOCAL',
       produto,
-      mensagem: `${produto.descricao} não consta em ${sessao.local} na cópia de estoque.`,
+      mensagem: `${produto.descricao} não consta em ${sessao.local} na cópia de estoque. Para registrar aqui, o gestor precisa liberar com a senha dele.`,
     };
   }
 
@@ -1274,8 +1406,9 @@ export async function registrar(input: {
   codigoBipado?: string;
   iniciadoEm?: string;
   confirmarForaDoLocal?: boolean;
+  liberacao?: string;
   foto?: { buffer: Buffer; mimeType: string };
-}): Promise<RegistroLivreDTO> {
+}): Promise<RegistroLivreDTO & { divergente: boolean }> {
   const usuario = await usuarioAtivo(input.usuarioId);
   const { sessao, contagem } = await sessaoAbertaDe(usuario, input.sessaoId);
 
@@ -1293,6 +1426,7 @@ export async function registrar(input: {
     codigoProduto: input.codigoProduto,
     codigo: input.codigoBipado,
     confirmarForaDoLocal: input.confirmarForaDoLocal,
+    liberacao: input.liberacao,
   });
   if (conferido.status !== 'OK') {
     throw new ErroContagemLivre(
@@ -1365,6 +1499,7 @@ export async function registrar(input: {
         iniciadoEm,
         fotoChave,
         chaveUnica,
+        foraDoLocalAutorizadoPor: foraDoLocal ? lerLiberacao(input.liberacao, sessao.id, produto.codigoProduto) : null,
       },
     });
   } catch (erro) {
@@ -1394,7 +1529,39 @@ export async function registrar(input: {
     `${numero === 2 ? 'Recontou' : 'Contou'} ${produto.descricao} em ${sessao.local}${foraDoLocal ? ' (fora do local)' : ''}.`,
     { contagemId: contagem.id, codigoProduto: produto.codigoProduto, localCodigo: sessao.localCodigo, numeroContagem: numero }
   );
-  return montarRegistro(criado, true);
+  return { ...montarRegistro(criado, true), divergente: foraDoLocal ? false : await divergeNoLocal(criado) };
+}
+
+// "Identificar divergência na hora": o que esta pessoa já registrou do
+// produto aqui bate com o disponível da cópia? Só diz sim ou não. O número
+// do sistema nunca vai pro celular: a contagem continua cega.
+async function divergeNoLocal(r: { contagemId: string; codigoProduto: string; localCodigo: string; empresaCodigo: string; numeroContagem: number }) {
+  const [naCopia, contado] = await Promise.all([
+    prisma.contagemLivreEstoque.findFirst({
+      where: { contagemId: r.contagemId, codigoProduto: r.codigoProduto, localCodigo: r.localCodigo, empresaCodigo: r.empresaCodigo },
+      select: { quantidadeTotal: true, quantidadeReservada: true },
+    }),
+    prisma.contagemLivreRegistro.aggregate({
+      where: { contagemId: r.contagemId, codigoProduto: r.codigoProduto, localCodigo: r.localCodigo, empresaCodigo: r.empresaCodigo, numeroContagem: r.numeroContagem },
+      _sum: { quantidade: true },
+    }),
+  ]);
+  const disponivel = naCopia ? naCopia.quantidadeTotal - naCopia.quantidadeReservada : 0;
+  return Math.round(((contado._sum.quantidade ?? 0) - disponivel) * 1000) !== 0;
+}
+
+// O contador viu o aviso de divergência e conferiu de novo: fica no log que
+// a quantidade foi confirmada.
+export async function confirmarDivergencia(usuarioId: string, registroId: string) {
+  const usuario = await usuarioAtivo(usuarioId);
+  const r = await prisma.contagemLivreRegistro.findUnique({ where: { id: registroId } });
+  if (!r || r.usuarioId !== usuario.id) throw new ErroContagemLivre('Registro não encontrado.', 'NAO_ENCONTRADA');
+  void registrarLog(usuario.id, 'DIVERGENCIA_CONFIRMADA', `Conferiu de novo e confirmou ${r.quantidade} ${r.unidade} de ${r.descricao} em ${r.local}.`, {
+    contagemId: r.contagemId,
+    codigoProduto: r.codigoProduto,
+    localCodigo: r.localCodigo,
+    registroId: r.id,
+  });
 }
 
 // Quem contou apaga o próprio registro enquanto o local está aberto (é a
@@ -1592,12 +1759,26 @@ export interface LinhaRelatorioLivre {
   unidade: string;
   localCodigo: string;
   local: string;
-  // NAO_CONTADO = estava na cópia de um local já finalizado e ninguém contou.
-  // Sai sem número de propósito: quem decide o que ele significa é o gestor.
+  // NAO_CONTADO = está na cópia e ninguém contou. Sai sem número de
+  // propósito: quem decide o que ele significa é o gestor. `localFinalizado`
+  // separa o "ninguém achou" (local já varrido) do "ainda não chegaram lá".
   situacao: 'CONTADO' | 'NAO_CONTADO';
+  localFinalizado: boolean;
   foraDoLocal: boolean;
-  // Onde a cópia diz que o produto está, quando ele foi achado fora.
+  // Onde a cópia diz que o produto está, quando ele foi achado fora e não
+  // tinha local certo pra onde ir (produto que a cópia não tem em lugar nenhum).
   locaisNaCopia: string[];
+  // Achado fora do lugar e somado AQUI, no local da cópia (chamado de
+  // 17/10): os locais onde ele estava de verdade.
+  achadoEm: string[];
+  // Gestores que liberaram, com a senha, o registro fora do local.
+  liberadoPor: string[];
+  // ESTOQUE = o saldo do produto (soma de todos os locais) não bate.
+  // LOCAL = este local não bate, mas sobra e falta entre locais se anulam:
+  // o estoque está certo, só no lugar errado.
+  tipoDivergencia: 'ESTOQUE' | 'LOCAL' | null;
+  // Contado − disponível do produto somando os locais contados.
+  divergenciaProduto: number | null;
   // A que vale: a 2ª quando existe, senão a 1ª.
   quantidadeContada: number | null;
   quantidade1: number | null;
@@ -1706,9 +1887,34 @@ async function montarRelatorio(
     locaisDoProduto.set(e.codigoProduto, locais);
   }
 
+  // Item achado fora do lugar soma no local onde a cópia o registra (o de
+  // maior saldo, se forem vários). Assim ele não vira sobra num local e falta
+  // no outro. Sem local na cópia (produto que ela não tem), fica onde foi achado.
+  const localCerto = new Map<string, { localCodigo: string; total: number }>();
+  for (const e of estoque) {
+    if (ignorados.has(e.localCodigo)) continue;
+    const k = `${e.codigoProduto}|${e.empresaCodigo}`;
+    const atual = localCerto.get(k);
+    if (!atual || e.quantidadeTotal > atual.total) localCerto.set(k, { localCodigo: e.localCodigo, total: e.quantidadeTotal });
+  }
+  const achadoEm = new Map<string, Set<string>>();
+  const destinoDe = (r: (typeof registros)[number]) => {
+    if (!r.foraDoLocal) return chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
+    const certo = localCerto.get(`${r.codigoProduto}|${r.empresaCodigo}`);
+    if (!certo || certo.localCodigo === r.localCodigo) return chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
+    const k = chaveDe(r.codigoProduto, certo.localCodigo, r.empresaCodigo);
+    const onde = achadoEm.get(k) ?? new Set<string>();
+    onde.add(r.local);
+    achadoEm.set(k, onde);
+    return k;
+  };
+
   const porItem = new Map<string, { n1: typeof registros; n2: typeof registros }>();
+  // Linhas com contagem feita NELAS (não só o que veio realocado de outro local).
+  const comContagemPropria = new Set<string>();
   for (const r of registros) {
-    const k = chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
+    const k = destinoDe(r);
+    if (k === chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo)) comContagemPropria.add(k);
     const atual = porItem.get(k) ?? { n1: [], n2: [] };
     (r.numeroContagem === 2 ? atual.n2 : atual.n1).push(r);
     porItem.set(k, atual);
@@ -1720,8 +1926,10 @@ async function montarRelatorio(
 
   const chaves = new Set<string>(porItem.keys());
   for (const e of estoque) {
-    // Local ignorado nunca gera "não contado": ele não faz parte do estoque usado.
-    if (e.quantidadeTotal > 0 && locaisFinalizados.has(e.localCodigo) && !ignorados.has(e.localCodigo)) {
+    // Todo o estoque da cópia aparece desde a abertura, contado ou não.
+    // Local ignorado nunca gera "não contado": ele não faz parte do estoque
+    // usado. Saldo zero que ninguém achou está certo, e não aparece.
+    if (e.quantidadeTotal > 0 && !ignorados.has(e.localCodigo)) {
       chaves.add(chaveDe(e.codigoProduto, e.localCodigo, e.empresaCodigo));
     }
   }
@@ -1747,12 +1955,17 @@ async function montarRelatorio(
 
     const quantidade1 = soma(item.n1);
     const quantidade2 = soma(item.n2);
-    const quantidadeContada = quantidade2 ?? quantidade1;
+    // Só o que veio de fora, num local que ainda não foi contado: espera o
+    // local ser contado (ou finalizado) pra virar contagem. Senão o achado
+    // fora viraria "falta" ali antes de alguém chegar no local.
+    const esperandoLocal = !comContagemPropria.has(k) && !locaisFinalizados.has(localCodigo);
+    const quantidadeContada = esperandoLocal ? null : quantidade2 ?? quantidade1;
     const quantidadeTotal = naCopia?.quantidadeTotal ?? 0;
     const quantidadeReservada = naCopia?.quantidadeReservada ?? 0;
     const quantidadeDisponivel = Math.round((quantidadeTotal - quantidadeReservada) * 1000) / 1000;
     const custoUnitario = naCopia?.custoSemIcms ?? custoPorProduto.get(`${codigoProduto}|${empresaCodigo}`) ?? null;
     const foraDoLocal = [...item.n1, ...item.n2].some((r) => r.foraDoLocal);
+    const achados = [...(achadoEm.get(k) ?? [])].sort();
 
     linhas.push({
       chave: k,
@@ -1764,8 +1977,13 @@ async function montarRelatorio(
       localCodigo,
       local: naCopia?.local ?? qualquer?.local ?? rec?.local ?? localCodigo,
       situacao: quantidadeContada === null ? 'NAO_CONTADO' : 'CONTADO',
+      localFinalizado: locaisFinalizados.has(localCodigo),
       foraDoLocal,
-      locaisNaCopia: foraDoLocal ? [...(locaisDoProduto.get(codigoProduto) ?? [])].sort() : [],
+      locaisNaCopia: foraDoLocal && achados.length === 0 ? [...(locaisDoProduto.get(codigoProduto) ?? [])].sort() : [],
+      achadoEm: achados,
+      liberadoPor: [...new Set([...item.n1, ...item.n2].map((r) => r.foraDoLocalAutorizadoPor).filter((n): n is string => !!n))],
+      tipoDivergencia: null,
+      divergenciaProduto: null,
       quantidadeContada,
       quantidade1,
       quantidade2,
@@ -1795,6 +2013,23 @@ async function montarRelatorio(
         quantidade: r.quantidade,
       })),
     });
+  }
+
+  // Divergência de estoque é a do saldo do produto: a soma, em todos os
+  // locais contados, do contado menos o disponível. O que não foi contado
+  // vale pelo sistema (não entra na soma). Linha que diverge num produto
+  // cuja soma dá zero é divergência de LOCAL.
+  const somaProduto = new Map<string, number>();
+  for (const l of linhas) {
+    if (l.quantidadeDivergente === null || l.quarentena) continue;
+    const k = `${l.codigoProduto}|${l.empresaCodigo}`;
+    somaProduto.set(k, (somaProduto.get(k) ?? 0) + l.quantidadeDivergente);
+  }
+  for (const l of linhas) {
+    if (l.quantidadeDivergente === null || l.quarentena) continue;
+    const soma = Math.round((somaProduto.get(`${l.codigoProduto}|${l.empresaCodigo}`) ?? 0) * 1000) / 1000;
+    l.divergenciaProduto = soma;
+    if (l.quantidadeDivergente !== 0) l.tipoDivergencia = soma !== 0 ? 'ESTOQUE' : 'LOCAL';
   }
 
   linhas.sort(
@@ -1845,6 +2080,10 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: 'Situação', largura: 13, valor: (l) => (l.situacao === 'CONTADO' ? 'Contado' : 'Não contado') },
     { titulo: 'Fora do local', largura: 10, valor: (l) => (l.foraDoLocal ? 'Sim' : 'Não') },
     { titulo: 'Local na cópia', largura: 32, valor: (l) => l.locaisNaCopia.join(' · ') },
+    { titulo: 'Achado em', largura: 32, valor: (l) => l.achadoEm.join(' · ') },
+    { titulo: 'Fora do local liberado por', largura: 22, valor: (l) => l.liberadoPor.join(', ') },
+    { titulo: 'Tipo de divergência', largura: 14, valor: (l) => (l.tipoDivergencia === 'ESTOQUE' ? 'Estoque' : l.tipoDivergencia === 'LOCAL' ? 'Local' : '') },
+    { titulo: 'Divergência do produto', largura: 12, valor: (l) => l.divergenciaProduto, numero: '#,##0.###;[Red]-#,##0.###' },
     { titulo: 'Qtd. 1ª contagem', largura: 11, valor: (l) => l.quantidade1, numero: '#,##0.###' },
     { titulo: 'Qtd. 2ª contagem', largura: 11, valor: (l) => l.quantidade2, numero: '#,##0.###' },
     { titulo: 'Recontagem', largura: 11, valor: (l) => ({ NAO: '', PENDENTE: 'Pendente', FEITA: 'Feita' })[l.recontagem] },
@@ -2115,6 +2354,21 @@ async function montarDashboard(contagemId: string) {
   type Bloco = { total: number; contados: number; emAndamento: number; divergencias: number };
   const ruas = new Map<string, Bloco & { predios: Map<string, Bloco> }>();
   const novo = (): Bloco => ({ total: 0, contados: 0, emAndamento: 0, divergencias: 0 });
+  // Valor e sobra/falta são do PRODUTO (a soma dos locais), contados uma vez
+  // só, mesmo que ele divirja em vários locais.
+  const produtosSomados = new Set<string>();
+  const somarProduto = (l: LinhaRelatorioLivre, custo: number, local: string) => {
+    const k = `${l.codigoProduto}|${l.empresaCodigo}`;
+    if (produtosSomados.has(k) || l.divergenciaProduto === null) return;
+    produtosSomados.add(k);
+    const d = l.divergenciaProduto;
+    const v = Math.abs(d) * custo;
+    divergenciaAbs += v;
+    if (d < 0) { faltas.skus += 1; faltas.quantidade += -d; faltas.custo += v; faltaV += v; }
+    else { sobras.skus += 1; sobras.quantidade += d; sobras.custo += v; sobraV += v; }
+    topFin.push({ descricao: l.descricao, local, valor: v });
+    topFis.push({ descricao: l.descricao, local, quantidade: Math.abs(d) });
+  };
 
   for (const e of universo) {
     const l = linhaDe.get(chave(e.codigoProduto, e.localCodigo, e.empresaCodigo));
@@ -2127,7 +2381,9 @@ async function montarDashboard(contagemId: string) {
     }
     const emQuarentena = Boolean(l?.quarentena);
     const contado = l?.situacao === 'CONTADO';
-    const divergente = contado && !emQuarentena && (l!.quantidadeDivergente ?? 0) !== 0;
+    // Só a divergência de ESTOQUE (saldo do produto) conta aqui; a de local
+    // está certa no total e aparece à parte.
+    const divergente = contado && !emQuarentena && l!.tipoDivergencia === 'ESTOQUE';
     const valorItem = e.quantidadeTotal * custo;
 
     if (emQuarentena) quarentena += 1;
@@ -2143,13 +2399,7 @@ async function montarDashboard(contagemId: string) {
     }
     if (divergente) {
       divergencias += 1;
-      const d = l!.quantidadeDivergente!;
-      const v = Math.abs(d) * custo;
-      divergenciaAbs += v;
-      if (d < 0) { faltas.skus += 1; faltas.quantidade += -d; faltas.custo += v; faltaV += v; }
-      else { sobras.skus += 1; sobras.quantidade += d; sobras.custo += v; sobraV += v; }
-      topFin.push({ descricao: e.descricao, local: e.local, valor: v });
-      topFis.push({ descricao: e.descricao, local: e.local, quantidade: Math.abs(d) });
+      somarProduto(l!, custo, e.local);
     }
 
     const { rua, predio } = parsearLocalizacao(e.local);
@@ -2168,7 +2418,17 @@ async function montarDashboard(contagemId: string) {
   // Truncado em duas casas, nunca arredondado: 2 divergências em 11 mil itens
   // arredondavam pra "100%", e 100% só pode aparecer quando não há nenhuma.
   const truncar = (v: number) => Math.floor(v * 10000) / 100;
-  const base = universo.length - quarentena;
+  // Produto achado que a cópia não tem em lugar nenhum: é sobra de estoque,
+  // e entra igual nas divergências e na acuracidade.
+  const noUniverso = new Set(universo.map((e) => chave(e.codigoProduto, e.localCodigo, e.empresaCodigo)));
+  let foraDaCopia = 0;
+  for (const l of linhas) {
+    if (noUniverso.has(l.chave) || ignorados.has(l.localCodigo) || l.tipoDivergencia !== 'ESTOQUE') continue;
+    foraDaCopia += 1;
+    divergencias += 1;
+    somarProduto(l, l.custoUnitario ?? 0, l.local);
+  }
+  const base = universo.length + foraDaCopia - quarentena;
   const acuraciaFisica = base > 0 ? truncar((base - divergencias) / base) : 100;
   const acuraciaFinanceira = valorTotal > 0 ? truncar(valorCerto / valorTotal) : 100;
   const numerico = (a: string, b: string) => a.localeCompare(b, 'pt-BR', { numeric: true });
@@ -2179,7 +2439,7 @@ async function montarDashboard(contagemId: string) {
   for (const r of registros) {
     if (r.numeroContagem !== 1) continue;
     const l = linhaDe.get(chave(r.codigoProduto, r.localCodigo, r.empresaCodigo));
-    const div = Boolean(l && !l.quarentena && (l.quantidadeDivergente ?? 0) !== 0);
+    const div = l?.tipoDivergencia === 'ESTOQUE';
     const u = porUsuario.get(r.usuarioId) ?? { nome: r.usuario.nome, contados: 0, divergencias: 0 };
     u.contados += 1;
     if (div) u.divergencias += 1;
@@ -2224,6 +2484,8 @@ async function montarDashboard(contagemId: string) {
       emAndamento: mapa.reduce((t, r) => t + r.emAndamento, 0),
       divergencias,
       divergenciaLocal: linhas.filter((l) => l.foraDoLocal).length,
+      // Produtos com o saldo certo, mas em lugar errado.
+      divergenciasDeLocal: new Set(linhas.filter((l) => l.tipoDivergencia === 'LOCAL').map((l) => `${l.codigoProduto}|${l.empresaCodigo}`)).size,
       segundaContagem: linhas.filter((l) => l.recontagem === 'PENDENTE').length,
       percentualConcluido: universo.length ? Math.round((contados / universo.length) * 1000) / 10 : 0,
       acuracia: acuraciaFisica,
