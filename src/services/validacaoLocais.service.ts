@@ -278,7 +278,9 @@ export async function listarValidacoes(filtro: FiltroValidacao) {
     where: { iniciadaEm: { gte: filtro.de, lte: filtro.ate } },
     include: { usuario: { select: { nome: true } }, itens: { orderBy: { bipadoEm: 'asc' } } },
     orderBy: { iniciadaEm: 'desc' },
-    take: 500,
+    // Sem limite: com "take: 500" o painel mostrava só as 500 validações mais
+    // recentes e as antigas sumiam da tela (o Excel, sem limite, tinha tudo).
+    // O período escolhido no painel é o que segura o tamanho.
   });
   return lista.map((v) => ({
     id: v.id,
