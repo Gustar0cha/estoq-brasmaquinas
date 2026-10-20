@@ -74,6 +74,7 @@ model Usuario {
   quarentenasMovidas         ContagemLivreQuarentena[]
   reaberturasPedidas         ContagemLivreReabertura[] @relation("ReaberturaPedidaPor")
   reaberturasDecididas       ContagemLivreReabertura[] @relation("ReaberturaDecididaPor")
+  validacoesLocais           ValidacaoLocal[]
 
   @@map("usuarios")
 }
@@ -870,4 +871,50 @@ model ContagemLivreReabertura {
   @@index([contagemId, localCodigo, solicitanteId])
   @@index([status])
   @@map("contagem_livre_reaberturas")
+}
+
+enum SituacaoValidacao {
+  // O Sankhya tem saldo do produto neste local.
+  NO_LOCAL
+  // Tem saldo em outro local, não neste.
+  FORA_DO_LOCAL
+  // Não tem saldo em local nenhum da loja.
+  SEM_SALDO
+}
+
+// Validar locais (pedido de 20/10): a pessoa bipa um local e vai bipando os
+// produtos que estão nele; o sistema diz, na hora, se cada um é de lá
+// segundo o saldo do Sankhya (TGFEST). Não conta quantidade, não mexe em
+// contagem nenhuma: é a conferência de "o que está no lugar errado".
+model ValidacaoLocal {
+  id            String              @id @default(uuid())
+  usuario       Usuario             @relation(fields: [usuarioId], references: [id])
+  usuarioId     String
+  localCodigo   String
+  local         String
+  empresaCodigo String?
+  iniciadaEm    DateTime            @default(now())
+  finalizadaEm  DateTime?
+  itens         ValidacaoLocalItem[]
+
+  @@index([usuarioId, finalizadaEm])
+  @@index([iniciadaEm])
+  @@map("validacao_locais")
+}
+
+model ValidacaoLocalItem {
+  id           String            @id @default(uuid())
+  validacao    ValidacaoLocal    @relation(fields: [validacaoId], references: [id], onDelete: Cascade)
+  validacaoId  String
+  codigoProduto String
+  descricao    String
+  unidade      String
+  codigoBipado String?
+  situacao     SituacaoValidacao
+  // Onde o Sankhya tem saldo do produto, quando não é aqui ("RUA 1 PRÉDIO 2 · RUA 4…").
+  locaisComSaldo String?
+  bipadoEm     DateTime          @default(now())
+
+  @@unique([validacaoId, codigoProduto])
+  @@map("validacao_locais_itens")
 }

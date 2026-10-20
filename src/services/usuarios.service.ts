@@ -125,6 +125,7 @@ export async function vinculosDoUsuario(id: string): Promise<number> {
     prisma.contagemLivreQuarentena.count({ where: { usuarioId: id } }),
     prisma.localIgnorado.count({ where: { criadoPorId: id } }),
     prisma.contagemLivreReabertura.count({ where: { OR: [{ solicitanteId: id }, { decididaPorId: id }] } }),
+    prisma.validacaoLocal.count({ where: { usuarioId: id } }),
   ]).then((n) => n.reduce((a, b) => a + b, 0));
   const [contagens, conferencias, atribuicoes, tarefas, responsavel] = await Promise.all([
     prisma.contagemItem.count({
