@@ -587,9 +587,12 @@ export interface SessaoLivreDTO {
   fotoObrigatoria: boolean;
   travaLocal: boolean;
   travaDuplicada: boolean;
-  // Quantos produtos a cópia diz ter no local e quantos já foram contados —
-  // a barra de progresso. Nunca a quantidade de nenhum deles.
-  progresso: { contados: number; total: number };
+  // 1ª contagem: só quantos produtos ESTA pessoa registrou aqui, e `total`
+  // nulo. Quantos a cópia espera no local nunca vai pro celular (chamado
+  // #324): "0 de 99" contava ao contador o que procurar, e quebrava a
+  // contagem cega. Recontagem: X de N da lista que o gestor pediu, que o
+  // contador já vê de propósito.
+  progresso: { contados: number; total: number | null };
   meusRegistros: RegistroLivreDTO[];
   // Só na recontagem: QUAIS produtos o gestor pediu pra recontar ali. Quem
   // reconta precisa saber o que procurar; continua sem ver número nenhum.
@@ -618,19 +621,9 @@ async function montarSessao(sessao: LinhaSessao, contagem: LinhaContagem, usuari
     }));
     progresso = { contados: recontar.filter((r) => r.feito).length, total: recontar.length };
   } else {
-    const [naCopia, contados] = await Promise.all([
-      prisma.contagemLivreEstoque.findMany({
-        where: { contagemId: contagem.id, localCodigo: sessao.localCodigo, quantidadeTotal: { gt: 0 } },
-        select: { codigoProduto: true },
-      }),
-      prisma.contagemLivreRegistro.findMany({
-        where: { contagemId: contagem.id, localCodigo: sessao.localCodigo, numeroContagem: 1, foraDoLocal: false },
-        select: { codigoProduto: true },
-        distinct: ['codigoProduto'],
-      }),
-    ]);
-    const daCopia = new Set(naCopia.map((n) => n.codigoProduto));
-    progresso = { contados: contados.filter((c) => daCopia.has(c.codigoProduto)).length, total: daCopia.size };
+    // Contar só o que está na cópia também entregava se o produto bipado era
+    // esperado ali: conta tudo o que a pessoa registrou no local.
+    progresso = { contados: new Set(meus.map((r) => r.codigoProduto)).size, total: null };
   }
 
   return {
