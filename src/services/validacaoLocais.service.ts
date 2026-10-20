@@ -292,7 +292,9 @@ export async function listarValidacoes(filtro: FiltroValidacao) {
   }));
 }
 
-const hora = (d: Date | null) => (d ? d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '');
+// Um formatador só: criar um por célula pesa no Excel.
+const dataHoraSP = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' });
+const hora = (d: Date | null) => (d ? dataHoraSP.format(d) : '');
 const SITUACAO_TEXTO: Record<Situacao, string> = { NO_LOCAL: 'No local', FORA_DO_LOCAL: 'Fora do local', SEM_SALDO: 'Sem saldo no sistema' };
 
 export async function gerarValidacaoXlsx(filtro: FiltroValidacao) {

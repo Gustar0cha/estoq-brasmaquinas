@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
 
 import { empresaDaFilial, filialDoLocal, labelFilial, localVisivelPara } from '../lib/filiais';
 import jwt from 'jsonwebtoken';
@@ -1806,8 +1808,65 @@ export interface LinhaRelatorioLivre {
 // Registrar não limpa o cache: os números da equipe podem atrasar até 10 s
 // no painel. Ação do gestor (quarentena, excluir, recontagem, locais
 // ignorados, configuração) limpa, porque ele espera ver o resultado na hora.
-const CACHE_MS = 10_000;
-type Relatorio = { contagem: ContagemLivreDTO; linhas: LinhaRelatorioLivre[] };
+// 15 s = o intervalo em que Visão geral e TV se atualizam: várias telas
+// abertas montam no máximo um relatório a cada 15 s (medido em 20/10: 2 s de
+// CPU por montagem com 14 mil linhas).
+const CACHE_MS = 15_000;
+type RegistroDoRelatorio = Awaited<ReturnType<typeof registrosDaContagem>>[number];
+// `registros` fica só no servidor: o painel (dashboard) reaproveita, em vez
+// de ler tudo de novo do banco. A rota manda só contagem + linhas.
+type Relatorio = { contagem: ContagemLivreDTO; linhas: LinhaRelatorioLivre[]; registros: RegistroDoRelatorio[] };
+const cacheRelatorioGz = new Map<string, { em: number; valor: Promise<unknown> }>();
+const comprimir = promisify(gzip);
+
+// Formatadores criados UMA vez. `localeCompare('pt-BR')` e `toLocale…()` com
+// opções montam um formatador novo a cada chamada; com 14 mil linhas (e 84
+// mil células de data no Excel) isso era a maior parte do tempo do relatório.
+const ordemPtBr = new Intl.Collator('pt-BR', { numeric: true });
+const ordemTexto = new Intl.Collator('pt-BR');
+const diaSP = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' });
+const dataHoraSP = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' });
+
+function registrosDaContagem(contagemId: string) {
+  return prisma.contagemLivreRegistro.findMany({
+    where: { contagemId },
+    include: { usuario: { select: { nome: true } } },
+    orderBy: { registradoEm: 'asc' },
+  });
+}
+
+// A cópia de estoque (dezenas de milhares de linhas) não muda durante a
+// contagem: fica em memória e só é relida quando o número de linhas no banco
+// muda (preparar de novo, ligar a quarentena). Guarda poucas contagens, as
+// que estão sendo olhadas.
+type LinhaEstoque = {
+  empresaCodigo: string; codigoProduto: string; descricao: string; unidade: string;
+  localCodigo: string; local: string; quantidadeTotal: number; quantidadeReservada: number; custoSemIcms: number | null;
+};
+const cacheEstoque = new Map<string, { total: number; linhas: LinhaEstoque[] }>();
+const MAX_COPIAS_EM_MEMORIA = 3;
+
+async function estoqueDaCopia(contagemId: string): Promise<LinhaEstoque[]> {
+  const total = await prisma.contagemLivreEstoque.count({ where: { contagemId } });
+  const guardado = cacheEstoque.get(contagemId);
+  if (guardado && guardado.total === total) {
+    // Usada agora: vai pro fim da fila de descarte.
+    cacheEstoque.delete(contagemId);
+    cacheEstoque.set(contagemId, guardado);
+    return guardado.linhas;
+  }
+  const linhas = await prisma.contagemLivreEstoque.findMany({
+    where: { contagemId },
+    select: {
+      empresaCodigo: true, codigoProduto: true, descricao: true, unidade: true,
+      localCodigo: true, local: true, quantidadeTotal: true, quantidadeReservada: true, custoSemIcms: true,
+    },
+  });
+  cacheEstoque.delete(contagemId);
+  cacheEstoque.set(contagemId, { total, linhas });
+  while (cacheEstoque.size > MAX_COPIAS_EM_MEMORIA) cacheEstoque.delete(cacheEstoque.keys().next().value!);
+  return linhas;
+}
 const cacheRelatorio = new Map<string, { em: number; valor: Promise<Relatorio> }>();
 const cacheDashboard = new Map<string, { em: number; valor: Promise<unknown> }>();
 
@@ -1815,9 +1874,12 @@ export function esquecerRelatorio(contagemId?: string) {
   if (contagemId) {
     cacheRelatorio.delete(contagemId);
     cacheDashboard.delete(contagemId);
+    cacheRelatorioGz.delete(contagemId);
   } else {
     cacheRelatorio.clear();
     cacheDashboard.clear();
+    cacheRelatorioGz.clear();
+    cacheEstoque.clear();
   }
 }
 
@@ -1837,25 +1899,23 @@ export function relatorioContagemLivre(contagemId: string): Promise<Relatorio> {
   return lembrar(cacheRelatorio, contagemId, () => montarRelatorio(contagemId));
 }
 
-async function montarRelatorio(
-  contagemId: string
-): Promise<{ contagem: ContagemLivreDTO; linhas: LinhaRelatorioLivre[] }> {
+// O relatório como a rota manda: JSON já comprimido, feito UMA vez por
+// montagem. Antes cada pedido convertia os ~12 MB em texto e comprimia de
+// novo, mesmo com o relatório no cache.
+export function relatorioComprimido(contagemId: string): Promise<Buffer> {
+  return lembrar(cacheRelatorioGz, contagemId, async () => {
+    const { contagem, linhas } = await relatorioContagemLivre(contagemId);
+    return comprimir(Buffer.from(JSON.stringify({ contagem, linhas })));
+  });
+}
+
+async function montarRelatorio(contagemId: string): Promise<Relatorio> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
   const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados] = await Promise.all([
-    prisma.contagemLivreEstoque.findMany({
-      where: { contagemId },
-      select: {
-        empresaCodigo: true, codigoProduto: true, descricao: true, unidade: true,
-        localCodigo: true, local: true, quantidadeTotal: true, quantidadeReservada: true, custoSemIcms: true,
-      },
-    }),
-    prisma.contagemLivreRegistro.findMany({
-      where: { contagemId },
-      include: { usuario: { select: { nome: true } } },
-      orderBy: { registradoEm: 'asc' },
-    }),
+    estoqueDaCopia(contagemId),
+    registrosDaContagem(contagemId),
     prisma.contagemLivreSessao.findMany({
       where: { contagemId, numeroContagem: 1, finalizadaEm: { not: null } },
       select: { localCodigo: true },
@@ -2027,14 +2087,14 @@ async function montarRelatorio(
 
   linhas.sort(
     (a, b) =>
-      a.local.localeCompare(b.local, 'pt-BR', { numeric: true }) ||
-      a.descricao.localeCompare(b.descricao, 'pt-BR')
+      ordemPtBr.compare(a.local, b.local) ||
+      ordemTexto.compare(a.descricao, b.descricao)
   );
-  return { contagem: montarContagem(contagem), linhas };
+  return { contagem: montarContagem(contagem), linhas, registros };
 }
 
 const formatoHora = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
+  iso ? dataHoraSP.format(new Date(iso)) : '';
 
 export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: ExcelJS.Buffer; nomeArquivo: string }> {
   const { contagem, linhas } = await montarRelatorio(contagemId);
@@ -2307,20 +2367,16 @@ async function montarDashboard(contagemId: string) {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [{ linhas }, estoqueTodo, ignorados, sessoesAbertas, registros, outras] = await Promise.all([
+  // A cópia vem da memória e os registros, do relatório já montado: o
+  // painel não relê o banco inteiro a cada 15 s.
+  const [{ linhas, registros }, copia, ignorados, sessoesAbertas, outras] = await Promise.all([
     relatorioContagemLivre(contagemId),
-    prisma.contagemLivreEstoque.findMany({
-      where: { contagemId, quantidadeTotal: { gt: 0 } },
-      select: { codigoProduto: true, localCodigo: true, empresaCodigo: true, local: true, descricao: true, quantidadeTotal: true, quantidadeReservada: true, custoSemIcms: true },
-    }),
+    estoqueDaCopia(contagemId),
     codigosIgnorados(),
     prisma.contagemLivreSessao.findMany({ where: { contagemId, finalizadaEm: null }, select: { localCodigo: true, usuarioId: true } }),
-    prisma.contagemLivreRegistro.findMany({
-      where: { contagemId },
-      select: { usuarioId: true, codigoProduto: true, localCodigo: true, empresaCodigo: true, numeroContagem: true, registradoEm: true, usuario: { select: { nome: true } } },
-    }),
     prisma.contagemLivre.findMany({ where: { status: 'ATIVA', id: { not: contagemId } }, orderBy: { criadaEm: 'desc' } }),
   ]);
+  const estoqueTodo = copia.filter((e) => e.quantidadeTotal > 0);
 
   const estoque = estoqueTodo.filter((e) => quarentenaVisivel(contagem, e.local));
   const chave = (p: string, l: string, e: string) => `${p}|${l}|${e}`;
@@ -2424,7 +2480,7 @@ async function montarDashboard(contagemId: string) {
   const base = universo.length + foraDaCopia - quarentena;
   const acuraciaFisica = base > 0 ? truncar((base - divergencias) / base) : 100;
   const acuraciaFinanceira = valorTotal > 0 ? truncar(valorCerto / valorTotal) : 100;
-  const numerico = (a: string, b: string) => a.localeCompare(b, 'pt-BR', { numeric: true });
+  const numerico = (a: string, b: string) => ordemPtBr.compare(a, b);
 
   // Ranking e produção por dia saem dos registros de 1ª contagem.
   const porUsuario = new Map<string, { nome: string; contados: number; divergencias: number }>();
@@ -2437,7 +2493,7 @@ async function montarDashboard(contagemId: string) {
     u.contados += 1;
     if (div) u.divergencias += 1;
     porUsuario.set(r.usuarioId, u);
-    const dia = r.registradoEm.toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
+    const dia = diaSP.format(r.registradoEm);
     const d = porDia.get(dia) ?? { contados: 0, divergencias: 0 };
     d.contados += 1;
     if (div) d.divergencias += 1;

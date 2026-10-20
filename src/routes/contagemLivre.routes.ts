@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import multer from 'multer';
+import { gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 
 import { autenticar, exigirAdmin, exigirContador, exigirGestor, exigirLeitura } from '../middleware/auth';
@@ -231,7 +232,17 @@ contagemLivreRouter.delete('/:id', autenticar, exigirAdmin, rota(async (req, res
 }));
 
 contagemLivreRouter.get('/:id/relatorio', autenticar, exigirGestor, rota(async (req, res) => {
-  res.json(await servico.relatorioContagemLivre(param(req, 'id')));
+  // Vai já comprimido (feito uma vez por montagem); o middleware de
+  // compressão vê o Content-Encoding e não comprime de novo.
+  const corpo = await servico.relatorioComprimido(param(req, 'id'));
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Vary', 'Accept-Encoding');
+  if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.send(corpo);
+  } else {
+    res.send(gunzipSync(corpo));
+  }
 }));
 
 contagemLivreRouter.get('/:id/relatorio.xlsx', autenticar, exigirGestor, rota(async (req, res) => {

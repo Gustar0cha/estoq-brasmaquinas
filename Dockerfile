@@ -23,4 +23,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
 
 EXPOSE 3000
-CMD ["node", "dist/server.js"]
+# Teto de memória do Node: o pico medido (20/10/2026, 3 telas do painel e
+# 14 mil linhas) foi ~305 MB. O teto faz o coletor de lixo trabalhar antes de
+# a VPS ficar sem RAM, com folga pro Excel do relatório.
+CMD ["node", "--max-old-space-size=768", "dist/server.js"]
