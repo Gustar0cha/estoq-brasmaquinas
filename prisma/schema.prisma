@@ -895,6 +895,11 @@ model ValidacaoLocal {
   empresaCodigo String?
   iniciadaEm    DateTime            @default(now())
   finalizadaEm  DateTime?
+  // SKUs com saldo no local pelo Sankhya na hora em que a validação abriu
+  // ([{codigoProduto, descricao, unidade}]): dá o "X de N" e, no fim, os
+  // que ficaram sem bipar (chamado #355). Nulo em validação aberta antes
+  // disso: é preenchido na hora de finalizar.
+  esperados     Json?
   itens         ValidacaoLocalItem[]
 
   @@index([usuarioId, finalizadaEm])

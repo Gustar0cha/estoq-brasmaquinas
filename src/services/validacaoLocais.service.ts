@@ -38,6 +38,12 @@ export interface ItemValidacaoDTO {
   bipadoEm: string;
 }
 
+export interface ProdutoEsperado {
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+}
+
 export interface ValidacaoDTO {
   id: string;
   localCodigo: string;
@@ -45,11 +51,15 @@ export interface ValidacaoDTO {
   iniciadaEm: string;
   finalizadaEm: string | null;
   itens: ItemValidacaoDTO[];
-  resumo: { bipados: number; noLocal: number; foraDoLocal: number; semSaldo: number };
+  // `esperados` = SKUs com saldo no local; `doLocal` = quantos deles já foram
+  // bipados. Aqui não é contagem cega: saber quantos faltam é o objetivo.
+  resumo: { bipados: number; noLocal: number; foraDoLocal: number; semSaldo: number; esperados: number; doLocal: number };
+  // Só depois de finalizar: os SKUs do local que ninguém bipou.
+  naoBipados: ProdutoEsperado[];
 }
 
 export type BipeValidacaoDTO =
-  | { status: 'OK'; item: ItemValidacaoDTO; repetido: boolean }
+  | { status: 'OK'; item: ItemValidacaoDTO; repetido: boolean; resumo?: ValidacaoDTO['resumo'] }
   | { status: 'VARIOS'; produtos: { codigoProduto: string; descricao: string; unidade: string }[] }
   | { status: 'ETIQUETA_DE_LOCAL'; localCodigo: string; local: string }
   | { status: 'NAO_IDENTIFICADO'; mensagem: string };
@@ -74,17 +84,30 @@ function itemDTO(i: { id: string; codigoProduto: string; descricao: string; unid
   };
 }
 
-function resumoDe(itens: { situacao: Situacao }[]) {
+// O Prisma tipa Json como objeto genérico: a lista vai como valor JSON.
+const comoJson = (l: ProdutoEsperado[]) => l.map((e) => ({ ...e }));
+const lerEsperados = (j: unknown): ProdutoEsperado[] => (Array.isArray(j) ? (j as ProdutoEsperado[]) : []);
+
+function resumoDe(itens: { situacao: Situacao; codigoProduto: string }[], esperados: ProdutoEsperado[]) {
+  const doLocal = new Set(esperados.map((e) => e.codigoProduto));
   return {
     bipados: itens.length,
     noLocal: itens.filter((i) => i.situacao === 'NO_LOCAL').length,
     foraDoLocal: itens.filter((i) => i.situacao === 'FORA_DO_LOCAL').length,
     semSaldo: itens.filter((i) => i.situacao === 'SEM_SALDO').length,
+    esperados: esperados.length,
+    doLocal: itens.filter((i) => doLocal.has(i.codigoProduto)).length,
   };
 }
 
+const naoBipadosDe = (itens: { codigoProduto: string }[], esperados: ProdutoEsperado[]) => {
+  const bipados = new Set(itens.map((i) => i.codigoProduto));
+  return esperados.filter((e) => !bipados.has(e.codigoProduto));
+};
+
 async function validacaoDTO(id: string): Promise<ValidacaoDTO> {
   const v = await prisma.validacaoLocal.findUniqueOrThrow({ where: { id }, include: { itens: { orderBy: { bipadoEm: 'desc' } } } });
+  const esperados = lerEsperados(v.esperados);
   return {
     id: v.id,
     localCodigo: v.localCodigo,
@@ -92,8 +115,25 @@ async function validacaoDTO(id: string): Promise<ValidacaoDTO> {
     iniciadaEm: v.iniciadaEm.toISOString(),
     finalizadaEm: v.finalizadaEm?.toISOString() ?? null,
     itens: v.itens.map(itemDTO),
-    resumo: resumoDe(v.itens),
+    resumo: resumoDe(v.itens, esperados),
+    naoBipados: v.finalizadaEm ? naoBipadosDe(v.itens, esperados) : [],
   };
+}
+
+// Os SKUs com saldo no local agora, pelo Sankhya (TGFEST quebra por lote: soma).
+async function esperadosNoLocal(localCodigo: string, empresa: string | null): Promise<ProdutoEsperado[]> {
+  if (!/^\d+$/.test(localCodigo)) return [];
+  const filtroEmpresa = empresa && /^\d+$/.test(empresa) ? `AND EST.CODEMP = ${Number(empresa)}` : '';
+  const linhas = await executarQuery<{ codigoProduto: number; descricao: string | null; unidade: string | null }>(`
+    SELECT EST.CODPROD AS "codigoProduto", MAX(PRO.DESCRPROD) AS "descricao", MAX(PRO.CODVOL) AS "unidade"
+    FROM TGFEST EST
+    INNER JOIN TGFPRO PRO ON PRO.CODPROD = EST.CODPROD
+    WHERE EST.CODLOCAL = ${Number(localCodigo)} ${filtroEmpresa}
+    GROUP BY EST.CODPROD
+    HAVING SUM(NVL(EST.ESTOQUE, 0)) > 0
+    ORDER BY MAX(PRO.DESCRPROD)
+  `);
+  return linhas.map((l) => ({ codigoProduto: String(l.codigoProduto), descricao: l.descricao ?? String(l.codigoProduto), unidade: l.unidade ?? '' }));
 }
 
 // Onde o Sankhya tem saldo do produto agora, na loja do local (TGFEST
@@ -113,17 +153,28 @@ async function locaisComSaldo(codigoProduto: string, empresa: string | null) {
   return linhas.map((l) => ({ localCodigo: String(l.localCodigo), local: l.local ?? String(l.localCodigo) }));
 }
 
-export async function estadoValidacao(usuarioId: string): Promise<{ aberta: ValidacaoDTO | null; ultima: { local: string; finalizadaEm: string; resumo: ValidacaoDTO['resumo'] } | null }> {
+export async function estadoValidacao(usuarioId: string): Promise<{
+  aberta: ValidacaoDTO | null;
+  ultima: { local: string; finalizadaEm: string; resumo: ValidacaoDTO['resumo']; naoBipados: ProdutoEsperado[] } | null;
+}> {
   const usuario = await usuarioAtivo(usuarioId);
   const aberta = await prisma.validacaoLocal.findFirst({ where: { usuarioId: usuario.id, finalizadaEm: null }, orderBy: { iniciadaEm: 'desc' } });
   const ultima = await prisma.validacaoLocal.findFirst({
     where: { usuarioId: usuario.id, finalizadaEm: { not: null } },
     orderBy: { finalizadaEm: 'desc' },
-    include: { itens: { select: { situacao: true } } },
+    include: { itens: { select: { situacao: true, codigoProduto: true } } },
   });
+  const esperadosUltima = lerEsperados(ultima?.esperados);
   return {
     aberta: aberta ? await validacaoDTO(aberta.id) : null,
-    ultima: ultima?.finalizadaEm ? { local: ultima.local, finalizadaEm: ultima.finalizadaEm.toISOString(), resumo: resumoDe(ultima.itens) } : null,
+    ultima: ultima?.finalizadaEm
+      ? {
+          local: ultima.local,
+          finalizadaEm: ultima.finalizadaEm.toISOString(),
+          resumo: resumoDe(ultima.itens, esperadosUltima),
+          naoBipados: naoBipadosDe(ultima.itens, esperadosUltima),
+        }
+      : null,
   };
 }
 
@@ -147,8 +198,15 @@ export async function abrirValidacao(usuarioId: string, codigoLocal: string): Pr
   // Um local de cada vez: abrir outro finaliza o anterior.
   if (aberta) await finalizarValidacao(usuario.id, aberta.id);
 
+  const empresa = empresaDaFilial(filialDoLocal(codigo));
+  let esperados: ProdutoEsperado[];
+  try {
+    esperados = await esperadosNoLocal(codigo, empresa);
+  } catch {
+    throw new ErroValidacao('Não consegui ler os produtos do local no Sankhya agora. Tente de novo.', 'SANKHYA');
+  }
   const nova = await prisma.validacaoLocal.create({
-    data: { usuarioId: usuario.id, localCodigo: codigo, local: doSankhya.local, empresaCodigo: empresaDaFilial(filialDoLocal(codigo)) },
+    data: { usuarioId: usuario.id, localCodigo: codigo, local: doSankhya.local, empresaCodigo: empresa, esperados: comoJson(esperados) },
   });
   void registrarLog(usuario.id, 'VALIDACAO_INICIADA', `Começou a validar ${doSankhya.local}.`, { validacaoId: nova.id, localCodigo: codigo });
   return validacaoDTO(nova.id);
@@ -199,7 +257,7 @@ export async function biparNaValidacao(input: { usuarioId: string; validacaoId: 
   }
 
   const ja = await prisma.validacaoLocalItem.findUnique({ where: { validacaoId_codigoProduto: { validacaoId: v.id, codigoProduto: produto.codigoProduto } } });
-  if (ja) return { status: 'OK', item: itemDTO(ja), repetido: true };
+  if (ja) return { status: 'OK', item: itemDTO(ja), repetido: true, resumo: (await validacaoDTO(v.id)).resumo };
 
   let comSaldo;
   try {
@@ -207,7 +265,7 @@ export async function biparNaValidacao(input: { usuarioId: string; validacaoId: 
   } catch {
     throw new ErroValidacao('Não consegui consultar o saldo no Sankhya agora. Bipe de novo.', 'SANKHYA');
   }
-  const aqui = comSaldo.some((l) => l.localCodigo === v.localCodigo);
+  const aqui = comSaldo.some((l) => l.localCodigo === v.localCodigo) || lerEsperados(v.esperados).some((e) => e.codigoProduto === produto.codigoProduto);
   const situacao: Situacao = aqui ? 'NO_LOCAL' : comSaldo.length > 0 ? 'FORA_DO_LOCAL' : 'SEM_SALDO';
   const outros = comSaldo.filter((l) => l.localCodigo !== v.localCodigo).slice(0, 5).map((l) => l.local);
 
@@ -228,7 +286,7 @@ export async function biparNaValidacao(input: { usuarioId: string; validacaoId: 
     // Dois bipes do mesmo produto no mesmo instante: vale o primeiro.
     if ((erro as { code?: string }).code !== 'P2002') throw erro;
     const existente = await prisma.validacaoLocalItem.findUniqueOrThrow({ where: { validacaoId_codigoProduto: { validacaoId: v.id, codigoProduto: produto.codigoProduto } } });
-    return { status: 'OK', item: itemDTO(existente), repetido: true };
+    return { status: 'OK', item: itemDTO(existente), repetido: true, resumo: (await validacaoDTO(v.id)).resumo };
   }
   if (situacao === 'FORA_DO_LOCAL') {
     void registrarLog(usuario.id, 'VALIDACAO_FORA_DO_LOCAL', `Achou ${produto.descricao} em ${v.local}; o saldo está em ${outros.join(', ')}.`, {
@@ -237,7 +295,7 @@ export async function biparNaValidacao(input: { usuarioId: string; validacaoId: 
       codigoProduto: produto.codigoProduto,
     });
   }
-  return { status: 'OK', item: itemDTO(item), repetido: false };
+  return { status: 'OK', item: itemDTO(item), repetido: false, resumo: (await validacaoDTO(v.id)).resumo };
 }
 
 export async function removerItemValidacao(usuarioId: string, itemId: string) {
@@ -250,16 +308,20 @@ export async function removerItemValidacao(usuarioId: string, itemId: string) {
 
 export async function finalizarValidacao(usuarioId: string, validacaoId: string): Promise<ValidacaoDTO> {
   const usuario = await usuarioAtivo(usuarioId);
-  const v = await prisma.validacaoLocal.findUnique({ where: { id: validacaoId }, include: { itens: { select: { situacao: true } } } });
+  const v = await prisma.validacaoLocal.findUnique({ where: { id: validacaoId }, include: { itens: { select: { situacao: true, codigoProduto: true } } } });
   if (!v || v.usuarioId !== usuario.id) throw new ErroValidacao('Validação não encontrada.', 'NAO_ENCONTRADA');
   if (!v.finalizadaEm) {
-    await prisma.validacaoLocal.update({ where: { id: v.id }, data: { finalizadaEm: new Date() } });
-    const r = resumoDe(v.itens);
+    // Validação aberta antes do #355 não tem a lista: lê agora (sem ela, sem "não bipados").
+    let esperados = Array.isArray(v.esperados) ? lerEsperados(v.esperados) : null;
+    if (!esperados) esperados = await esperadosNoLocal(v.localCodigo, v.empresaCodigo).catch(() => []);
+    await prisma.validacaoLocal.update({ where: { id: v.id }, data: { finalizadaEm: new Date(), esperados: comoJson(esperados) } });
+    const r = resumoDe(v.itens, esperados);
+    const faltam = naoBipadosDe(v.itens, esperados);
     void registrarLog(
       usuario.id,
       'VALIDACAO_FINALIZADA',
-      `Finalizou a validação de ${v.local}: ${r.bipados} ${r.bipados === 1 ? 'produto' : 'produtos'}, ${r.foraDoLocal} fora do local, ${r.semSaldo} sem saldo.`,
-      { validacaoId: v.id, localCodigo: v.localCodigo, ...r }
+      `Finalizou a validação de ${v.local}: ${r.bipados} ${r.bipados === 1 ? 'produto bipado' : 'produtos bipados'} (${r.doLocal} de ${r.esperados} SKUs do local), ${r.foraDoLocal} fora do local, ${r.semSaldo} sem saldo, ${faltam.length} não bipados.`,
+      { validacaoId: v.id, localCodigo: v.localCodigo, ...r, naoBipados: faltam.map((f) => f.codigoProduto), leituras: v.itens.map((i) => i.codigoProduto) }
     );
   }
   return validacaoDTO(v.id);
@@ -289,8 +351,9 @@ export async function listarValidacoes(filtro: FiltroValidacao) {
     usuario: v.usuario.nome,
     iniciadaEm: v.iniciadaEm.toISOString(),
     finalizadaEm: v.finalizadaEm?.toISOString() ?? null,
-    resumo: resumoDe(v.itens),
+    resumo: resumoDe(v.itens, lerEsperados(v.esperados)),
     itens: v.itens.map(itemDTO),
+    naoBipados: v.finalizadaEm ? naoBipadosDe(v.itens, lerEsperados(v.esperados)) : [],
   }));
 }
 
@@ -326,6 +389,15 @@ export async function gerarValidacaoXlsx(filtro: FiltroValidacao) {
         Number(i.codigoProduto) || i.codigoProduto, i.descricao, i.unidade, SITUACAO_TEXTO[i.situacao], i.locaisComSaldo ?? '', hora(i.bipadoEm),
       ]);
       if (i.situacao === 'FORA_DO_LOCAL') linha.getCell(9).font = { bold: true, color: { argb: 'FFD1372F' } };
+    }
+    // Os SKUs que o Sankhya tem no local e ninguém bipou (chamado #355).
+    if (filtro.somenteForaDoLocal || !v.finalizadaEm) continue;
+    for (const n of naoBipadosDe(v.itens, lerEsperados(v.esperados))) {
+      const linha = ws.addRow([
+        Number(v.localCodigo) || v.localCodigo, v.local, v.usuario.nome, hora(v.iniciadaEm), hora(v.finalizadaEm),
+        Number(n.codigoProduto) || n.codigoProduto, n.descricao, n.unidade, 'Não bipado', '', '',
+      ]);
+      linha.getCell(9).font = { bold: true, color: { argb: 'FFC9820A' } };
     }
   }
   ws.views = [{ state: 'frozen', ySplit: 4 }];
