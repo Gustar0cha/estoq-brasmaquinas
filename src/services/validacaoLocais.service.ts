@@ -198,6 +198,20 @@ export async function abrirValidacao(usuarioId: string, codigoLocal: string): Pr
   // Um local de cada vez: abrir outro finaliza o anterior.
   if (aberta) await finalizarValidacao(usuario.id, aberta.id);
 
+  // O mesmo local já validado HOJE por esta pessoa: reabre aquela validação,
+  // com o que já foi bipado. Antes abria outra do zero, e o relatório somava
+  // as duas (85 SKUs viravam 170, com os já bipados como "não bipados").
+  const hojeSP = new Date(`${diaSP.format(new Date())}T00:00:00-03:00`);
+  const deHoje = await prisma.validacaoLocal.findFirst({
+    where: { usuarioId: usuario.id, localCodigo: codigo, iniciadaEm: { gte: hojeSP }, finalizadaEm: { not: null } },
+    orderBy: { iniciadaEm: 'desc' },
+  });
+  if (deHoje) {
+    await prisma.validacaoLocal.update({ where: { id: deHoje.id }, data: { finalizadaEm: null } });
+    void registrarLog(usuario.id, 'VALIDACAO_REABERTA', `Voltou a validar ${deHoje.local} (validação de hoje, com o que já tinha bipado).`, { validacaoId: deHoje.id, localCodigo: codigo });
+    return validacaoDTO(deHoje.id);
+  }
+
   const empresa = empresaDaFilial(filialDoLocal(codigo));
   let esperados: ProdutoEsperado[];
   try {
@@ -357,6 +371,7 @@ export async function listarValidacoes(filtro: FiltroValidacao) {
   }));
 }
 
+const diaSP = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' });
 // Um formatador só: criar um por célula pesa no Excel.
 const dataHoraSP = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' });
 const hora = (d: Date | null) => (d ? dataHoraSP.format(d) : '');
