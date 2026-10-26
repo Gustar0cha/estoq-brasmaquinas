@@ -25,6 +25,7 @@ import { usuariosRouter } from './routes/usuarios.routes';
 import { contagemLivreRouter } from './routes/contagemLivre.routes';
 import { configuracoesRouter } from './routes/configuracoes.routes';
 import { validacaoLocaisRouter } from './routes/validacaoLocais.routes';
+import { consultaProdutosRouter } from './routes/consultaProdutos.routes';
 import { CAPACIDADES_FLUXO_LIVRE } from './services/operacaoLivre.service';
 
 export const app = express();
@@ -83,6 +84,7 @@ app.use('/usuarios', usuariosRouter);
 app.use('/contagem-livre', contagemLivreRouter);
 app.use('/configuracoes', configuracoesRouter);
 app.use('/validacao-locais', validacaoLocaisRouter);
+app.use('/consulta-produtos', consultaProdutosRouter);
 app.use('/movimentacoes', movimentacoesRouter);
 app.use('/item-conferencia', itemConferenciaRouter);
 app.use('/notificacoes', notificacoesRouter);
