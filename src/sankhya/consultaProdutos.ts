@@ -161,6 +161,24 @@ export async function getCatalogoProdutos(): Promise<ProdutoConsulta[]> {
   });
 }
 
+// Estoque e reservado por loja, lidos agora, de poucos produtos: a busca do
+// celular usa por cima do catálogo guardado (até 10 min), para a lista bater
+// com o detalhe do produto.
+export async function getEstoqueAtual(codigos: string[]): Promise<Map<string, ProdutoConsulta['estoque']>> {
+  const numeros = [...new Set(codigos.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  const porProduto = new Map<string, ProdutoConsulta['estoque']>();
+  if (!numeros.length) return porProduto;
+  const linhas = await executarQuery<{ p: number; e: number; t: number; r: number }>(`
+    SELECT CODPROD AS "p", CODEMP AS "e", SUM(NVL(ESTOQUE, 0)) AS "t", SUM(NVL(RESERVADO, 0)) AS "r"
+    FROM TGFEST
+    WHERE CODPROD IN (${numeros.join(',')})
+    GROUP BY CODPROD, CODEMP
+  `);
+  for (const n of numeros) porProduto.set(String(n), {});
+  for (const l of linhas) porProduto.get(String(l.p))![String(l.e)] = { total: Number(l.t) || 0, reservado: Number(l.r) || 0 };
+  return porProduto;
+}
+
 export interface DetalheEstoqueProduto {
   locais: { empresaCodigo: string; empresa: string; localCodigo: string; local: string; estoque: number; reservado: number; disponivel: number }[];
   reservas: { numeroUnico: string; numeroNota: string | null; empresaCodigo: string; empresa: string; parceiro: string | null; operacao: string | null; quantidade: number; data: string | null }[];

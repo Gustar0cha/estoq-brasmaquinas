@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { gunzipSync, gzip } from 'node:zlib';
 
 import { autenticar, exigirGestor } from '../middleware/auth';
-import { getCatalogoProdutos, getDetalheEstoqueProduto, LOJAS, ProdutoConsulta } from '../sankhya/consultaProdutos';
+import { getCatalogoProdutos, getDetalheEstoqueProduto, getEstoqueAtual, LOJAS, ProdutoConsulta } from '../sankhya/consultaProdutos';
 
 // Consulta de produtos no painel e no app (gestor e administrador). Ver
 // sankhya/consultaProdutos.ts.
@@ -94,7 +94,19 @@ consultaProdutosRouter.get('/busca', autenticar, exigirGestor, async (req, res) 
         achados.length = Math.min(achados.length, LIMITE);
       }
     }
-    res.json({ lidoEm, total, produtos: achados });
+    // O estoque da lista vem do Sankhya agora (o catálogo pode ter até 10
+    // min): senão a lista mostra um número e o detalhe, lido na hora, outro.
+    // Se a leitura falhar, fica o do catálogo.
+    let produtosResposta = achados;
+    let estoqueLidoEm = lidoEm;
+    try {
+      const agora = await getEstoqueAtual(achados.map((p) => p.codigo));
+      produtosResposta = achados.map((p) => ({ ...p, estoque: agora.get(p.codigo) ?? p.estoque }));
+      estoqueLidoEm = new Date().toISOString();
+    } catch (erro) {
+      console.error('[consulta-produtos] estoque atual', erro);
+    }
+    res.json({ lidoEm: estoqueLidoEm, total, produtos: produtosResposta });
   } catch (erro) {
     console.error('[consulta-produtos]', erro);
     res.status(503).json({ erro: 'Não consegui ler os produtos no Sankhya agora. Tente de novo em instantes.' });
