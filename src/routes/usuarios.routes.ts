@@ -29,6 +29,7 @@ const criarUsuarioSchema = z.object({
   senha: z.string().min(4),
   role: z.enum(['ADMIN', 'GESTOR', 'OPERADOR', 'VISUALIZADOR']),
   filial: z.string().nullable().optional(),
+  consultaProdutos: z.boolean().optional(),
 });
 
 usuariosRouter.post('/', autenticar, exigirAdmin, async (req, res) => {
@@ -54,6 +55,7 @@ const atualizarUsuarioSchema = z.object({
   role: z.enum(['ADMIN', 'GESTOR', 'OPERADOR', 'VISUALIZADOR']).optional(),
   filial: z.string().nullable().optional(),
   ativo: z.boolean().optional(),
+  consultaProdutos: z.boolean().optional(),
 });
 
 usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
@@ -68,7 +70,11 @@ usuariosRouter.patch('/:id', autenticar, exigirAdmin, async (req, res) => {
     const usuario = await usuariosService.atualizarUsuario(id, parse.data);
     esquecerPerfil(id);
     const mudou = Object.keys(parse.data).map((c) =>
-      c === 'senha' ? 'senha' : c === 'ativo' ? (parse.data.ativo ? 'reativou' : 'desativou') : c === 'role' ? `perfil ${nomePapel(usuario.role)}` : c
+      c === 'senha' ? 'senha' : c === 'ativo' ? (parse.data.ativo ? 'reativou' : 'desativou') : c === 'role'
+          ? `perfil ${nomePapel(usuario.role)}`
+          : c === 'consultaProdutos'
+            ? `${parse.data.consultaProdutos ? 'liberou' : 'travou'} a Consulta de produtos`
+            : c
     );
     void registrarLog(req.usuario!.sub, 'USUARIO_EDITADO', `Editou o login ${usuario.nome}: ${mudou.join(', ')}.`, { usuarioId: id, campos: Object.keys(parse.data) });
     res.json(usuario);

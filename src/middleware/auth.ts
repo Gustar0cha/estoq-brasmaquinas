@@ -18,13 +18,18 @@ declare global {
 // não só quando o token de 12h vencer. Guardado 30s pra não consultar o
 // banco a cada bipe.
 const VALIDADE_MS = 30_000;
-const perfis = new Map<string, { role: PapelUsuario; ativo: boolean; ate: number }>();
+const perfis = new Map<string, { role: PapelUsuario; ativo: boolean; consultaProdutos: boolean; ate: number }>();
 
 async function perfilAtual(id: string) {
   const guardado = perfis.get(id);
   if (guardado && guardado.ate > Date.now()) return guardado;
-  const u = await prisma.usuario.findUnique({ where: { id }, select: { role: true, ativo: true } });
-  const novo = { role: u?.role ?? ('OPERADOR' as PapelUsuario), ativo: !!u?.ativo, ate: Date.now() + VALIDADE_MS };
+  const u = await prisma.usuario.findUnique({ where: { id }, select: { role: true, ativo: true, consultaProdutos: true } });
+  const novo = {
+    role: u?.role ?? ('OPERADOR' as PapelUsuario),
+    ativo: !!u?.ativo,
+    consultaProdutos: !!u?.consultaProdutos,
+    ate: Date.now() + VALIDADE_MS,
+  };
   perfis.set(id, novo);
   return novo;
 }
@@ -57,7 +62,7 @@ export async function autenticar(req: Request, res: Response, next: NextFunction
       res.status(401).json({ erro: 'Esse login está desativado. Procure o gestor do estoque.' });
       return;
     }
-    req.usuario = { ...payload, role: perfil.role };
+    req.usuario = { ...payload, role: perfil.role, consultaProdutos: perfil.consultaProdutos };
     next();
   } catch (erro) {
     next(erro);
@@ -90,3 +95,16 @@ export const exigirAdmin = exigirPapel('ADMIN');
 export const exigirGestor = exigirPapel('ADMIN', 'GESTOR');
 export const exigirLeitura = exigirPapel('ADMIN', 'GESTOR', 'VISUALIZADOR');
 export const exigirContador = exigirPapel('ADMIN', 'OPERADOR');
+
+// Consulta de produtos: gestor e administrador, e o contador que o
+// administrador liberou (Configurações → Equipe).
+export function podeConsultarProdutos(usuario: Request['usuario']) {
+  return !!usuario && (usuario.role === 'ADMIN' || usuario.role === 'GESTOR' || (usuario.role === 'OPERADOR' && !!usuario.consultaProdutos));
+}
+export function exigirConsultaProdutos(req: Request, res: Response, next: NextFunction) {
+  if (!podeConsultarProdutos(req.usuario)) {
+    res.status(403).json({ erro: 'A Consulta de produtos não está liberada para o seu login. Fale com o administrador.', codigo: 'SEM_PERMISSAO' });
+    return;
+  }
+  next();
+}

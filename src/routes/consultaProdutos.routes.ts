@@ -2,10 +2,11 @@ import { Router } from 'express';
 import { promisify } from 'node:util';
 import { gunzipSync, gzip } from 'node:zlib';
 
-import { autenticar, exigirGestor } from '../middleware/auth';
+import { autenticar, exigirConsultaProdutos, exigirGestor, podeConsultarProdutos } from '../middleware/auth';
 import { getCatalogoProdutos, getDetalheEstoqueProduto, getEstoqueAtual, LOJAS, ProdutoConsulta } from '../sankhya/consultaProdutos';
 
-// Consulta de produtos no painel e no app (gestor e administrador). Ver
+// Consulta de produtos no painel (gestor e administrador) e no app (também o
+// contador liberado pelo administrador). Ver
 // sankhya/consultaProdutos.ts.
 export const consultaProdutosRouter = Router();
 
@@ -62,11 +63,17 @@ consultaProdutosRouter.get('/', autenticar, exigirGestor, async (req, res) => {
   }
 });
 
+// O app pergunta se mostra a opção no menu: o contador só vê se o
+// administrador liberou (vale na hora, sem sair e entrar de novo).
+consultaProdutosRouter.get('/acesso', autenticar, (req, res) => {
+  res.json({ liberado: podeConsultarProdutos(req.usuario) });
+});
+
 // Busca do celular: as mesmas regras do painel (vários códigos separados por
 // vírgula, ou todas as palavras na descrição/códigos), devolvendo no máximo
 // LIMITE produtos. Código exato (bipado) vem primeiro.
 const LIMITE = 50;
-consultaProdutosRouter.get('/busca', autenticar, exigirGestor, async (req, res) => {
+consultaProdutosRouter.get('/busca', autenticar, exigirConsultaProdutos, async (req, res) => {
   try {
     const { produtos, alvos, lidoEm } = await lerCatalogo(req.query.recarregar === 'true');
     const texto = String(req.query.q ?? '').trim();
@@ -116,7 +123,7 @@ consultaProdutosRouter.get('/busca', autenticar, exigirGestor, async (req, res) 
 });
 
 // Estoque por loja e local, e os pedidos que reservam: lido na hora.
-consultaProdutosRouter.get('/:codigo', autenticar, exigirGestor, async (req, res) => {
+consultaProdutosRouter.get('/:codigo', autenticar, exigirConsultaProdutos, async (req, res) => {
   try {
     res.json(await getDetalheEstoqueProduto(String((req.params as { codigo: string }).codigo)));
   } catch (erro) {

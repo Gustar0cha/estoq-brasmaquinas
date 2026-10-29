@@ -10,6 +10,7 @@ function semSenha(usuario: UsuarioPrisma) {
     login: usuario.login,
     role: usuario.role,
     filial: usuario.filial ?? null,
+    consultaProdutos: usuario.consultaProdutos,
   };
 }
 
@@ -35,6 +36,7 @@ export interface CriarUsuarioInput {
   role: PapelUsuario;
   // Loja do usuário (ver src/lib/filiais.ts); null = enxerga todas as lojas.
   filial?: string | null;
+  consultaProdutos?: boolean;
 }
 
 export async function criarUsuario(input: CriarUsuarioInput) {
@@ -51,6 +53,7 @@ export async function criarUsuario(input: CriarUsuarioInput) {
       senhaHash,
       role: input.role,
       filial: ehFilial(input.filial) ? input.filial : null,
+      consultaProdutos: input.consultaProdutos ?? false,
     },
   });
 
@@ -67,6 +70,8 @@ export interface AtualizarUsuarioInput {
   // apagando e recriando, o que levava o histórico junto.
   nome?: string;
   ativo?: boolean;
+  // Libera a Consulta de produtos para o contador.
+  consultaProdutos?: boolean;
 }
 
 export async function atualizarUsuario(id: string, input: AtualizarUsuarioInput) {
@@ -82,10 +87,12 @@ export async function atualizarUsuario(id: string, input: AtualizarUsuarioInput)
     filial?: string | null;
     nome?: string;
     ativo?: boolean;
+    consultaProdutos?: boolean;
   } = {};
 
   if (input.nome !== undefined && input.nome.trim()) dados.nome = input.nome.trim();
   if (input.ativo !== undefined) dados.ativo = input.ativo;
+  if (input.consultaProdutos !== undefined) dados.consultaProdutos = input.consultaProdutos;
 
   if (input.filial !== undefined) {
     dados.filial = ehFilial(input.filial) ? input.filial : null;

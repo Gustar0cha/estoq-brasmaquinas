@@ -37,6 +37,9 @@ model Usuario {
   // sem levar o histórico junto. Inativo não entra no sistema nem aparece
   // para receber tarefa.
   ativo     Boolean      @default(true)
+  // Contador com a Consulta de produtos liberada (gestor e administrador já
+  // têm). Mostra estoque, então é por pessoa: a contagem é cega.
+  consultaProdutos Boolean @default(false)
   criadoEm  DateTime     @default(now())
 
   atribuicoes   MovimentacaoAtribuicao[]

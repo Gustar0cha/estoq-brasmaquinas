@@ -6,6 +6,8 @@ import { PapelUsuario } from '../generated/prisma/client';
 export interface TokenPayload {
   sub: string;
   role: PapelUsuario;
+  // Não vai no token: o autenticar() preenche com o que está no banco.
+  consultaProdutos?: boolean;
 }
 
 export function assinarToken(payload: TokenPayload): string {
