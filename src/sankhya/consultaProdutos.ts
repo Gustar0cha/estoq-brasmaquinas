@@ -31,6 +31,8 @@ export interface ProdutoConsulta {
   referencia: string | null;
   unidade: string;
   codigoBarras: string | null;
+  // Os códigos de barras das outras unidades (caixa, peça…): também buscam.
+  outrosCodigosBarras: string[];
   // Estoque e reservado por loja (CODEMP), somando os locais.
   estoque: Record<string, { total: number; reservado: number }>;
   // Local padrão do produto em cada loja (campos AD_ do cadastro).
@@ -139,11 +141,35 @@ export async function getCatalogoProdutos(): Promise<ProdutoConsulta[]> {
     estoquePorProduto.set(k, atual);
   }
 
+  // Todos os códigos de barras do produto, de todas as unidades (TGFVOA) e
+  // os avulsos (TGFBAR): a etiqueta da caixa/peça costuma ser de outra
+  // unidade que não a principal (chamado #473).
+  const barras = await paginado<{ p: number; c: string }>((offset) => `
+    SELECT CODPROD AS "p", CODBARRA AS "c" FROM (
+      SELECT CODPROD, CODBARRA FROM TGFVOA WHERE CODBARRA IS NOT NULL
+      UNION SELECT CODPROD, CODBARRA FROM TGFBAR WHERE CODBARRA IS NOT NULL
+    )
+    ORDER BY CODPROD, CODBARRA
+    OFFSET ${offset} ROWS FETCH NEXT ${PAGINA} ROWS ONLY
+  `);
+  const barrasPorProduto = new Map<string, string[]>();
+  for (const b of barras) {
+    const c = String(b.c).trim();
+    if (!c) continue;
+    const k = String(b.p);
+    const lista = barrasPorProduto.get(k) ?? [];
+    lista.push(c);
+    barrasPorProduto.set(k, lista);
+  }
+
   const precos = await precosPorTabela();
 
   return produtos.map((p) => {
     const codigo = String(p.codigo);
+    const principal = p.barras ? String(p.barras).trim() : null;
+    const outros = (barrasPorProduto.get(codigo) ?? []).filter((c) => c !== principal);
     return {
+      outrosCodigosBarras: outros,
       codigo,
       codigoJanauba: p.janauba === null || p.janauba === undefined || p.janauba === '' ? null : String(p.janauba),
       descricao: p.descricao,

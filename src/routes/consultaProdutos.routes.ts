@@ -31,7 +31,9 @@ function lerCatalogo(recarregar: boolean) {
   const corpo = (async () => {
     const produtos = await getCatalogoProdutos();
     const lidoEm = new Date().toISOString();
-    const alvos = produtos.map((p) => normal(`${p.descricao} ${p.codigo} ${p.referencia ?? ''} ${p.codigoBarras ?? ''} ${p.codigoJanauba ?? ''}`));
+    const alvos = produtos.map((p) =>
+      normal(`${p.descricao} ${p.codigo} ${p.referencia ?? ''} ${p.codigoBarras ?? ''} ${p.codigoJanauba ?? ''} ${p.outrosCodigosBarras.join(' ')}`),
+    );
     return { gz: await comprimir(Buffer.from(JSON.stringify({ lidoEm, lojas: LOJAS, produtos }))), lidoEm, produtos, alvos };
   })();
   const entrada = { em: Date.now(), corpo };
@@ -71,7 +73,7 @@ consultaProdutosRouter.get('/busca', autenticar, exigirGestor, async (req, res) 
     const achados: ProdutoConsulta[] = [];
     let total = 0;
     if (texto) {
-      const codigosDe = (p: ProdutoConsulta) => [p.codigo, p.referencia, p.codigoBarras, p.codigoJanauba];
+      const codigosDe = (p: ProdutoConsulta) => [p.codigo, p.referencia, p.codigoBarras, p.codigoJanauba, ...p.outrosCodigosBarras];
       if (/[,;\n]/.test(texto)) {
         const codigos = new Set(texto.split(/[\n,;]+/).map((c) => normal(c.trim())).filter(Boolean));
         for (const p of produtos) {
