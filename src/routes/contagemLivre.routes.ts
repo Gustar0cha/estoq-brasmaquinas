@@ -114,8 +114,13 @@ contagemLivreRouter.post('/sessoes/:sessaoId/finalizar', autenticar, exigirConta
   res.json(await servico.finalizarLocal(usuarioId(req), param(req, 'sessaoId')));
 }));
 
+// O administrador que exclui a contagem de outra pessoa escreve o motivo, que
+// vai para os Logs. Quem apaga o próprio registro no celular não manda nada.
+const apagarSchema = z.object({ motivo: z.string().trim().max(300).optional() });
+
 contagemLivreRouter.delete('/registros/:registroId', autenticar, exigirContador, rota(async (req, res) => {
-  await servico.apagarRegistro(usuarioId(req), param(req, 'registroId'));
+  const { motivo } = apagarSchema.parse(req.body ?? {});
+  await servico.apagarRegistro(usuarioId(req), param(req, 'registroId'), motivo);
   res.status(204).end();
 }));
 

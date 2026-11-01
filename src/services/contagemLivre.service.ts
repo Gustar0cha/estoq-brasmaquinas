@@ -1562,12 +1562,17 @@ export async function confirmarDivergencia(usuarioId: string, registroId: string
 // Quem contou apaga o próprio registro enquanto o local está aberto (é a
 // correção de quem digitou errado). O gestor exclui qualquer item, a
 // qualquer momento — e isso fica no log com o nome dele.
-export async function apagarRegistro(usuarioId: string, registroId: string): Promise<void> {
+export async function apagarRegistro(usuarioId: string, registroId: string, motivo?: string): Promise<void> {
   const usuario = await usuarioAtivo(usuarioId);
   const registro = await prisma.contagemLivreRegistro.findUnique({ where: { id: registroId } });
   const gestor = usuario.role === 'ADMIN';
   if (!registro || (!gestor && registro.usuarioId !== usuario.id)) {
     throw new ErroContagemLivre('Registro não encontrado.', 'NAO_ENCONTRADA');
+  }
+  // Excluir o que outra pessoa contou pede justificativa: ela fica no log.
+  const deOutro = registro.usuarioId !== usuario.id;
+  if (deOutro && (motivo ?? '').trim().length < 5) {
+    throw new ErroContagemLivre('Escreva a justificativa da exclusão (mínimo 5 caracteres).');
   }
   if (!gestor) await sessaoAbertaDe(usuario, registro.sessaoId);
 
@@ -1592,12 +1597,15 @@ export async function apagarRegistro(usuarioId: string, registroId: string): Pro
       .catch(() => undefined);
   }
   const autor = registro.usuarioId === usuario.id ? '' : ` (contado por ${(await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa'})`;
-  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && registro.usuarioId !== usuario.id ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}.`, {
+  const justificativa = deOutro ? ` Justificativa: ${motivo!.trim()}` : '';
+  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && deOutro ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}${registro.numeroContagem === 2 ? ', 2ª contagem' : ''}.${justificativa}`, {
     contagemId: registro.contagemId,
     registroId: registro.id,
     codigoProduto: registro.codigoProduto,
     localCodigo: registro.localCodigo,
     quantidade: registro.quantidade,
+    numeroContagem: registro.numeroContagem,
+    ...(deOutro ? { motivo: motivo!.trim() } : {}),
   });
   if (registro.numeroContagem === 2) {
     await prisma.contagemLivreRecontagem.updateMany({
