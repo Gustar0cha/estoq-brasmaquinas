@@ -1657,7 +1657,7 @@ export async function pedirRecontagem(input: {
   itens: { codigoProduto: string; localCodigo: string; empresaCodigo: string }[];
   atribuidaParaId?: string | null;
   solicitadaPorId: string;
-}): Promise<{ pedidas: number; ignoradas: string[] }> {
+}): Promise<{ pedidas: number; trocadas: number; ignoradas: string[]; avisos: string[] }> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: input.contagemId } });
   if (!contagem || contagem.status !== 'ATIVA') {
     throw new ErroContagemLivre('Recontagem só pode ser pedida numa contagem ativa.');
@@ -1666,6 +1666,9 @@ export async function pedirRecontagem(input: {
 
   const ignoradas: string[] = [];
   let pedidas = 0;
+  // Recontagem pendente que muda de mãos (pedido de 03/11: quem ia recontar
+  // foi embora). Guarda de quem saiu, para o log e para o aviso abaixo.
+  const trocadas: { de: string | null; localCodigo: string }[] = [];
   for (const item of input.itens) {
     const [daCopia, primeiro, jaPedida] = await Promise.all([
       prisma.contagemLivreEstoque.findFirst({
@@ -1699,6 +1702,10 @@ export async function pedirRecontagem(input: {
       ignoradas.push(`${rotulo}: quem reconta não pode ser quem contou.`);
       continue;
     }
+    const novoDono = input.atribuidaParaId ?? null;
+    if (jaPedida && jaPedida.atribuidaParaId !== novoDono) {
+      trocadas.push({ de: jaPedida.atribuidaParaId, localCodigo: item.localCodigo });
+    }
 
     await prisma.contagemLivreRecontagem.upsert({
       where: {
@@ -1725,16 +1732,47 @@ export async function pedirRecontagem(input: {
     pedidas += 1;
   }
   if (pedidas > 0) esquecerRelatorio(contagem.id);
+  const avisos: string[] = [];
   if (pedidas > 0) {
-    const para = input.atribuidaParaId
-      ? (await prisma.usuario.findUnique({ where: { id: input.atribuidaParaId }, select: { nome: true } }))?.nome
-      : null;
-    void registrarLog(input.solicitadaPorId, 'RECONTAGEM_PEDIDA', `Pediu recontagem de ${pedidas} ${pedidas === 1 ? 'item' : 'itens'} em "${contagem.nome}"${para ? ` para ${para}` : ''}.`, {
-      contagemId: contagem.id,
-      itens: input.itens,
-    });
+    const ids = [...new Set([input.atribuidaParaId, ...trocadas.map((t) => t.de)].filter((id): id is string => !!id))];
+    const nomes = new Map(
+      (await prisma.usuario.findMany({ where: { id: { in: ids } }, select: { id: true, nome: true } })).map((u) => [u.id, u.nome])
+    );
+    const nomeDe = (id: string | null) => (id ? nomes.get(id) ?? 'outra pessoa' : 'qualquer colaborador');
+    const para = input.atribuidaParaId ? nomeDe(input.atribuidaParaId) : null;
+    const novas = pedidas - trocadas.length;
+    if (novas > 0) {
+      void registrarLog(input.solicitadaPorId, 'RECONTAGEM_PEDIDA', `Pediu recontagem de ${novas} ${novas === 1 ? 'item' : 'itens'} em "${contagem.nome}"${para ? ` para ${para}` : ''}.`, {
+        contagemId: contagem.id,
+        itens: input.itens,
+      });
+    }
+    if (trocadas.length > 0) {
+      const antes = [...new Set(trocadas.map((t) => nomeDe(t.de)))].join(', ');
+      void registrarLog(
+        input.solicitadaPorId,
+        'RECONTAGEM_PEDIDA',
+        `Trocou quem reconta ${trocadas.length} ${trocadas.length === 1 ? 'item' : 'itens'} em "${contagem.nome}": de ${antes} para ${nomeDe(input.atribuidaParaId ?? null)}.`,
+        { contagemId: contagem.id, itens: input.itens, trocadas }
+      );
+      // Quem saiu pode ter deixado o local aberto na recontagem: enquanto
+      // estiver aberto, ninguém mais entra nele.
+      const presas = await prisma.contagemLivreSessao.findMany({
+        where: {
+          contagemId: contagem.id,
+          numeroContagem: 2,
+          finalizadaEm: null,
+          localCodigo: { in: [...new Set(trocadas.map((t) => t.localCodigo))] },
+          ...(input.atribuidaParaId ? { usuarioId: { not: input.atribuidaParaId } } : {}),
+        },
+        include: { usuario: { select: { nome: true } } },
+      });
+      for (const s of presas) {
+        avisos.push(`${s.usuario.nome} ainda está com ${s.local} aberto. Finalize em "Locais abertos agora" para a nova pessoa conseguir entrar.`);
+      }
+    }
   }
-  return { pedidas, ignoradas };
+  return { pedidas, trocadas: trocadas.length, ignoradas, avisos };
 }
 
 export async function cancelarRecontagem(input: {
@@ -1801,6 +1839,8 @@ export interface LinhaRelatorioLivre {
   custoContagem: number | null;
   custoSistema: number | null;
   recontagem: 'NAO' | 'PENDENTE' | 'FEITA';
+  // Quem tem a recontagem pendente; nulo = qualquer colaborador.
+  recontagemPara: string | null;
   fotos: { registroId: string; numeroContagem: number }[];
   // Movido pra quarentena pelo gestor: sai das divergências e da acuracidade.
   quarentena: { usuario: string; em: string; observacao: string | null } | null;
@@ -1929,7 +1969,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       select: { localCodigo: true },
       distinct: ['localCodigo'],
     }),
-    prisma.contagemLivreRecontagem.findMany({ where: { contagemId } }),
+    prisma.contagemLivreRecontagem.findMany({ where: { contagemId }, include: { atribuidaPara: { select: { nome: true } } } }),
     prisma.contagemLivreQuarentena.findMany({ where: { contagemId }, include: { usuario: { select: { nome: true } } } }),
     codigosIgnorados(),
   ]);
@@ -2063,6 +2103,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       custoContagem: custoUnitario === null || quantidadeContada === null ? null : dinheiro(quantidadeContada * custoUnitario),
       custoSistema: custoUnitario === null ? null : dinheiro(quantidadeTotal * custoUnitario),
       recontagem: !rec ? 'NAO' : rec.concluidaEm ? 'FEITA' : 'PENDENTE',
+      recontagemPara: rec && !rec.concluidaEm ? rec.atribuidaPara?.nome ?? null : null,
       fotos: [...item.n1, ...item.n2]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
