@@ -225,6 +225,10 @@ contagemLivreRouter.post('/:id/encerrar', autenticar, exigirAdmin, rota(async (r
   res.json(await servico.encerrarContagemLivre(param(req, 'id'), usuarioId(req)));
 }));
 
+contagemLivreRouter.post('/:id/reabrir', autenticar, exigirAdmin, rota(async (req, res) => {
+  res.json(await servico.reabrirContagemLivre(param(req, 'id'), usuarioId(req)));
+}));
+
 contagemLivreRouter.post('/:id/preparar', autenticar, exigirAdmin, rota(async (req, res) => {
   res.json(await servico.tentarPrepararDeNovo(param(req, 'id')));
 }));

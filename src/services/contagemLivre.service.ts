@@ -525,6 +525,23 @@ export async function encerrarContagemLivre(contagemId: string, usuarioId: strin
   return montarContagem(encerrada);
 }
 
+// Reabrir (chamado #568): a contagem volta a ser ativa exatamente como
+// estava. Registros, locais finalizados e recontagens não mudam; para
+// fechar de novo, é o mesmo Encerrar.
+export async function reabrirContagemLivre(contagemId: string, usuarioId: string): Promise<ContagemLivreDTO> {
+  const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
+  if (!c) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
+  if (c.status === 'ATIVA') return montarContagem(c);
+  if (c.status !== 'ENCERRADA') throw new ErroContagemLivre('Só uma contagem encerrada pode ser reaberta.');
+  const reaberta = await prisma.contagemLivre.update({
+    where: { id: contagemId },
+    data: { status: 'ATIVA', encerradaEm: null },
+  });
+  esquecerRelatorio(contagemId);
+  void registrarLog(usuarioId, 'CONTAGEM_REABERTA', `Reabriu a contagem "${c.nome}".`, { contagemId });
+  return montarContagem(reaberta);
+}
+
 // Excluir apaga a contagem e TUDO dela: retrato, locais, registros, fotos e
 // recontagens. Com registros dentro só passa com `forcar` — o painel pede
 // confirmação digitada. O que foi pra quarentena fica no relatório de
