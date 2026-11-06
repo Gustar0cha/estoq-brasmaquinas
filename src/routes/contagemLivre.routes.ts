@@ -22,7 +22,7 @@ function responderErro(res: Response, erro: unknown) {
     const status =
       erro.codigo === 'NAO_ENCONTRADA' ? 404
       : erro.codigo === 'NAO_AUTORIZADO' || erro.codigo === 'LIBERACAO_RECUSADA' ? 403
-      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS', 'REABERTURA_PENDENTE', 'JA_DECIDIDA', 'LOCAL_OCUPADO'].includes(erro.codigo) ? 409
+      : ['SESSAO_ABERTA', 'JA_CONTADO', 'EMPRESA_OCUPADA', 'TEM_REGISTROS', 'REABERTURA_PENDENTE', 'JA_DECIDIDA', 'LOCAL_OCUPADO', 'ITENS_FALTANDO'].includes(erro.codigo) ? 409
       : 400;
     res.status(status).json({ erro: erro.message, codigo: erro.codigo, ...(erro.detalhes ?? {}) });
     return;
@@ -113,6 +113,11 @@ contagemLivreRouter.post('/sessoes/:sessaoId/registros', autenticar, exigirConta
     foto: req.file ? { buffer: req.file.buffer, mimeType: req.file.mimetype } : undefined,
   });
   res.status(201).json(registro);
+}));
+
+contagemLivreRouter.post('/sessoes/:sessaoId/finalizar-com-liberacao', autenticar, exigirContador, rota(async (req, res) => {
+  const dados = z.object({ login: z.string().trim().min(1).max(80), senha: z.string().min(1).max(200) }).parse(req.body);
+  res.json(await servico.finalizarComLiberacao({ usuarioId: usuarioId(req), sessaoId: param(req, 'sessaoId'), ...dados }));
 }));
 
 contagemLivreRouter.post('/sessoes/:sessaoId/finalizar', autenticar, exigirContador, rota(async (req, res) => {
@@ -231,6 +236,7 @@ const criarSchema = z.object({
   travaDuplicada: z.boolean().optional(),
   incluirQuarentena: z.boolean().optional(),
   limiteDivergencia: z.number().min(0).max(1000).nullable().optional(),
+  travaFinalizar: z.boolean().optional(),
 });
 
 contagemLivreRouter.post('/', autenticar, exigirAdmin, rota(async (req, res) => {
@@ -245,6 +251,7 @@ const atualizarSchema = z.object({
   travaDuplicada: z.boolean().optional(),
   incluirQuarentena: z.boolean().optional(),
   limiteDivergencia: z.number().min(0).max(1000).nullable().optional(),
+  travaFinalizar: z.boolean().optional(),
 });
 
 contagemLivreRouter.get('/:id/regras-divergencia', autenticar, exigirAdmin, rota(async (req, res) => {

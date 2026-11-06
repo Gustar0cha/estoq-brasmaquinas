@@ -125,6 +125,7 @@ export interface ContagemLivreDTO {
   travaDuplicada: boolean;
   incluirQuarentena: boolean;
   limiteDivergencia: number | null;
+  travaFinalizar: boolean;
   criadaEm: string;
   encerradaEm: string | null;
 }
@@ -159,6 +160,7 @@ function montarContagem(c: LinhaContagem): ContagemLivreDTO {
     travaDuplicada: c.travaDuplicada,
     incluirQuarentena: c.incluirQuarentena,
     limiteDivergencia: c.limiteDivergencia,
+    travaFinalizar: c.travaFinalizar,
     criadaEm: c.criadaEm.toISOString(),
     encerradaEm: c.encerradaEm?.toISOString() ?? null,
   };
@@ -255,6 +257,7 @@ export interface CriarContagemLivreInput {
   travaDuplicada?: boolean;
   incluirQuarentena?: boolean;
   limiteDivergencia?: number | null;
+  travaFinalizar?: boolean;
   usuarioId: string;
 }
 
@@ -297,6 +300,7 @@ export async function criarContagemLivre(input: CriarContagemLivreInput): Promis
       travaDuplicada: input.travaDuplicada ?? true,
       incluirQuarentena: input.incluirQuarentena ?? false,
       limiteDivergencia: input.limiteDivergencia === undefined ? LIMITE_DIVERGENCIA_PADRAO : input.limiteDivergencia,
+      travaFinalizar: input.travaFinalizar ?? true,
       criadaPorId: input.usuarioId,
     },
   });
@@ -475,11 +479,12 @@ const NOME_CONFIG = {
   travaLocal: 'a trava de local',
   travaDuplicada: 'a trava de duplicidade',
   incluirQuarentena: 'a contagem da área de quarentena',
+  travaFinalizar: 'a trava de finalizar local',
 } as const;
 
 export async function atualizarContagemLivre(
   contagemId: string,
-  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean; incluirQuarentena?: boolean; limiteDivergencia?: number | null },
+  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean; incluirQuarentena?: boolean; limiteDivergencia?: number | null; travaFinalizar?: boolean },
   usuarioId: string
 ): Promise<ContagemLivreDTO> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
@@ -495,6 +500,7 @@ export async function atualizarContagemLivre(
       ...(dados.travaDuplicada !== undefined ? { travaDuplicada: dados.travaDuplicada } : {}),
       ...(dados.incluirQuarentena !== undefined ? { incluirQuarentena: dados.incluirQuarentena } : {}),
       ...(dados.limiteDivergencia !== undefined ? { limiteDivergencia: dados.limiteDivergencia } : {}),
+      ...(dados.travaFinalizar !== undefined ? { travaFinalizar: dados.travaFinalizar } : {}),
     },
   });
   if (dados.incluirQuarentena !== undefined && dados.incluirQuarentena !== c.incluirQuarentena) {
@@ -780,7 +786,7 @@ export async function estadoDoColaborador(usuarioId: string): Promise<EstadoCola
     ? await prisma.contagemLivreSessao.findFirst({
         where: { usuarioId: usuario.id, finalizadaEm: { not: null }, contagemId: { in: ids } },
         orderBy: { finalizadaEm: 'desc' },
-        include: { _count: { select: { registros: true } } },
+        include: { _count: { select: { registros: { where: { zeradoPor: null } } } } },
       })
     : null;
 
@@ -900,6 +906,10 @@ export async function abrirLocal(input: {
         local: aberta.local,
       });
     }
+    // Bipar outro local não pula a trava de finalizar.
+    if (await precisaDoGestorParaFinalizar(aberta, contagem)) {
+      throw new ErroContagemLivre(`${aberta.local} ainda tem itens sem contagem. Volte para ele e finalize com a liberação do gestor.`, 'ITENS_FALTANDO');
+    }
     await prisma.contagemLivreSessao.update({ where: { id: aberta.id }, data: { finalizadaEm: new Date() } });
   }
 
@@ -926,6 +936,9 @@ export async function abrirLocal(input: {
 
   if (autorizacao) {
     await prisma.contagemLivreReabertura.update({ where: { id: autorizacao.id }, data: { status: 'USADA', usadaEm: new Date(), sessaoId: sessao.id } });
+    // Reabriu para contar: o que entrou como 0 sem ninguém contar volta a faltar.
+    const zerados = await prisma.contagemLivreRegistro.findMany({ where: { contagemId: contagem.id, localCodigo: codigo, zeradoPor: { not: null } } });
+    for (const z of zerados) await removerRegistro(z);
     void registrarLog(usuario.id, 'LOCAL_REABERTO', `Reabriu ${nomeLocal} em "${contagem.nome}", autorizado por ${autorizacao.decididaPor?.nome ?? '—'}: ${autorizacao.motivo ?? ''}`, {
       contagemId: contagem.id,
       localCodigo: codigo,
@@ -1896,6 +1909,10 @@ export async function finalizarLocal(usuarioId: string, sessaoId: string): Promi
   if (!sessao || sessao.usuarioId !== usuario.id) throw new ErroContagemLivre('Local não encontrado.', 'NAO_ENCONTRADA');
   const registros = await prisma.contagemLivreRegistro.count({ where: { sessaoId: sessao.id } });
   if (!sessao.finalizadaEm) {
+    const contagem = await prisma.contagemLivre.findUniqueOrThrow({ where: { id: sessao.contagemId } });
+    if (await precisaDoGestorParaFinalizar(sessao, contagem)) {
+      throw new ErroContagemLivre(`${sessao.local} ainda tem itens sem contagem. Para finalizar assim, chame o gestor.`, 'ITENS_FALTANDO');
+    }
     await prisma.contagemLivreSessao.update({ where: { id: sessao.id }, data: { finalizadaEm: new Date() } });
     void registrarLog(usuario.id, 'LOCAL_FINALIZADO', `Finalizou ${sessao.local} com ${registros} ${registros === 1 ? 'registro' : 'registros'}.`, {
       contagemId: sessao.contagemId,
@@ -1905,12 +1922,101 @@ export async function finalizarLocal(usuarioId: string, sessaoId: string): Promi
   return { local: sessao.local, registros };
 }
 
+// ---- Trava de finalizar (chamado #574) --------------------------------------
+//
+// Item da cópia com saldo que ninguém contou no local impede finalizar. O
+// gestor libera com login e senha no celular de quem conta, e o que falta entra
+// como contado 0. O celular só sabe que falta algo: quais e quantos itens são
+// não vão para lá, a contagem continua cega.
+
+async function itensSemContagem(contagemId: string, localCodigo: string) {
+  const [naCopia, contados] = await Promise.all([
+    prisma.contagemLivreEstoque.findMany({
+      where: { contagemId, localCodigo, quantidadeTotal: { gt: 0 } },
+      select: { codigoProduto: true, empresaCodigo: true, descricao: true, unidade: true },
+    }),
+    prisma.contagemLivreRegistro.findMany({
+      where: { contagemId, localCodigo, numeroContagem: 1 },
+      select: { codigoProduto: true, empresaCodigo: true },
+    }),
+  ]);
+  const jaContados = new Set(contados.map((r) => `${r.codigoProduto}|${r.empresaCodigo}`));
+  return naCopia.filter((e) => !jaContados.has(`${e.codigoProduto}|${e.empresaCodigo}`));
+}
+
+// A recontagem tem a própria lista de itens e não passa por aqui.
+async function precisaDoGestorParaFinalizar(sessao: { contagemId: string; localCodigo: string; numeroContagem: number }, contagem: { travaFinalizar: boolean }) {
+  if (!contagem.travaFinalizar || sessao.numeroContagem !== 1) return false;
+  return (await itensSemContagem(sessao.contagemId, sessao.localCodigo)).length > 0;
+}
+
+export async function finalizarComLiberacao(input: { usuarioId: string; sessaoId: string; login: string; senha: string }): Promise<{ local: string; registros: number }> {
+  const usuario = await usuarioAtivo(input.usuarioId);
+  const sessao = await prisma.contagemLivreSessao.findUnique({ where: { id: input.sessaoId } });
+  if (!sessao || sessao.usuarioId !== usuario.id) throw new ErroContagemLivre('Local não encontrado.', 'NAO_ENCONTRADA');
+  const registros = await prisma.contagemLivreRegistro.count({ where: { sessaoId: sessao.id, zeradoPor: null } });
+  if (sessao.finalizadaEm) return { local: sessao.local, registros };
+
+  const gestor = await prisma.usuario.findUnique({ where: { login: input.login.trim() } });
+  const valido = gestor && gestor.ativo && (await conferirHash(input.senha, gestor.senhaHash));
+  if (!gestor || !valido || (gestor.role !== 'ADMIN' && gestor.role !== 'GESTOR')) {
+    void registrarLog(usuario.id, 'LOCAL_ZERADO_SENHA_NEGADA', `Liberação para finalizar ${sessao.local} com itens sem contagem recusada (login "${input.login.trim()}").`, {
+      contagemId: sessao.contagemId,
+      localCodigo: sessao.localCodigo,
+    });
+    throw new ErroContagemLivre(
+      !gestor || !valido ? 'Login ou senha do gestor não conferem.' : 'Esse login não pode liberar: precisa ser gestor ou administrador.',
+      'LIBERACAO_RECUSADA'
+    );
+  }
+  if (gestor.id === usuario.id) throw new ErroContagemLivre('Quem está contando não pode liberar o próprio local.', 'LIBERACAO_RECUSADA');
+
+  const contagem = await prisma.contagemLivre.findUniqueOrThrow({ where: { id: sessao.contagemId } });
+  const faltando = sessao.numeroContagem === 1 ? await itensSemContagem(sessao.contagemId, sessao.localCodigo) : [];
+  const agora = new Date();
+  // Tudo ou nada: local finalizado pela metade deixaria itens sem contagem.
+  await prisma.$transaction([
+    prisma.contagemLivreItemDono.createMany({
+      data: faltando.map((e) => ({ chave: chaveItem(contagem.id, e.codigoProduto, sessao.localCodigo, e.empresaCodigo, 1), contagemId: contagem.id, usuarioId: usuario.id })),
+      skipDuplicates: true,
+    }),
+    prisma.contagemLivreRegistro.createMany({
+      data: faltando.map((e) => ({
+        contagemId: contagem.id,
+        sessaoId: sessao.id,
+        numeroContagem: 1,
+        empresaCodigo: e.empresaCodigo,
+        codigoProduto: e.codigoProduto,
+        descricao: e.descricao,
+        unidade: e.unidade,
+        localCodigo: sessao.localCodigo,
+        local: sessao.local,
+        quantidade: 0,
+        usuarioId: usuario.id,
+        iniciadoEm: agora,
+        chaveUnica: contagem.travaDuplicada ? chaveItem(contagem.id, e.codigoProduto, sessao.localCodigo, e.empresaCodigo, 1) : null,
+        zeradoPor: gestor.nome,
+      })),
+      skipDuplicates: true,
+    }),
+    prisma.contagemLivreSessao.update({ where: { id: sessao.id }, data: { finalizadaEm: agora } }),
+  ]);
+  esquecerRelatorio(contagem.id);
+  void registrarLog(
+    gestor.id,
+    'LOCAL_ZERADO',
+    `Liberou ${usuario.nome} a finalizar ${sessao.local} em "${contagem.nome}": ${faltando.length} ${faltando.length === 1 ? 'item sem contagem entrou' : 'itens sem contagem entraram'} como 0 (${nomePapel(gestor.role)}).`,
+    { contagemId: contagem.id, localCodigo: sessao.localCodigo, sessaoId: sessao.id, contadorId: usuario.id, produtos: faltando.map((e) => e.codigoProduto) }
+  );
+  return { local: sessao.local, registros };
+}
+
 // "O que já contei": tudo desta pessoa na contagem, do mais recente pro mais
 // antigo — com a quantidade que ELA digitou. O esperado nunca aparece.
 export async function meusRegistros(usuarioId: string, contagemId: string): Promise<RegistroLivreDTO[]> {
   const usuario = await usuarioAtivo(usuarioId);
   const registros = await prisma.contagemLivreRegistro.findMany({
-    where: { contagemId, usuarioId: usuario.id },
+    where: { contagemId, usuarioId: usuario.id, zeradoPor: null },
     include: { sessao: { select: { finalizadaEm: true } } },
     orderBy: { registradoEm: 'desc' },
     take: 500,
@@ -2112,6 +2218,8 @@ export interface LinhaRelatorioLivre {
   recontagemPara: string | null;
   // Tem contagem acima do limite esperando o gestor: ainda não entrou aqui.
   aguardandoAutorizacao: boolean;
+  // Gestor que liberou finalizar o local com este item sem contagem: entrou como 0.
+  zeradoPor: string | null;
   fotos: { registroId: string; numeroContagem: number }[];
   // Movido pra quarentena pelo gestor: sai das divergências e da acuracidade.
   quarentena: { usuario: string; em: string; observacao: string | null } | null;
@@ -2371,6 +2479,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       recontagem: !rec ? 'NAO' : rec.concluidaEm ? 'FEITA' : 'PENDENTE',
       recontagemPara: rec && !rec.concluidaEm ? rec.atribuidaPara?.nome ?? null : null,
       aguardandoAutorizacao: aguardando.has(k),
+      zeradoPor: [...item.n1, ...item.n2].find((r) => r.zeradoPor)?.zeradoPor ?? null,
       fotos: [...item.n1, ...item.n2]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
@@ -2470,6 +2579,7 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: 'Local na cópia', largura: 32, valor: (l) => l.locaisNaCopia.join(' · ') },
     { titulo: 'Achado em', largura: 32, valor: (l) => l.achadoEm.join(' · ') },
     { titulo: 'Fora do local liberado por', largura: 22, valor: (l) => l.liberadoPor.join(', ') },
+    { titulo: 'Zerado ao finalizar, liberado por', largura: 22, valor: (l) => l.zeradoPor ?? '' },
     { titulo: 'Tipo de divergência', largura: 14, valor: (l) => (l.tipoDivergencia === 'ESTOQUE' ? 'Estoque' : l.tipoDivergencia === 'LOCAL' ? 'Local' : '') },
     { titulo: 'Divergência do produto', largura: 12, valor: (l) => l.divergenciaProduto, numero: '#,##0.###;[Red]-#,##0.###' },
     { titulo: 'Qtd. 1ª contagem', largura: 11, valor: (l) => l.quantidade1, numero: '#,##0.###' },

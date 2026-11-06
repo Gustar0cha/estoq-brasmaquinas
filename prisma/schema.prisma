@@ -633,6 +633,9 @@ model ContagemLivre {
   //                     contagem só vale com autorização do gestor (#571).
   //                     Nulo = desligado.
   limiteDivergencia Float?
+  //   travaFinalizar  — local com item sem contagem só finaliza com a senha do
+  //                     gestor, e o que falta entra como contado 0 (#574).
+  travaFinalizar    Boolean @default(false)
 
   criadaPor   Usuario   @relation("ContagemLivreCriadaPor", fields: [criadaPorId], references: [id])
   criadaPorId String
@@ -742,6 +745,8 @@ model ContagemLivreRegistro {
   limiteAplicado           Float?
   divergenciaAutorizadaPor String?
   divergenciaAutorizadaEm  DateTime?
+  // Ninguém contou: entrou como 0 quando o gestor liberou finalizar o local.
+  zeradoPor                String?
 
   @@index([contagemId, codigoProduto, localCodigo])
   @@index([sessaoId])
