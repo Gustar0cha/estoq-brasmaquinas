@@ -533,6 +533,12 @@ export async function reabrirContagemLivre(contagemId: string, usuarioId: string
   if (!c) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
   if (c.status === 'ATIVA') return montarContagem(c);
   if (c.status !== 'ENCERRADA') throw new ErroContagemLivre('Só uma contagem encerrada pode ser reaberta.');
+  // Uma empresa, uma contagem ativa: é assim que o celular sabe onde contar.
+  const ocupadas = await empresasEmUso(c.id);
+  const conflito = c.empresas.find((e) => ocupadas.has(e));
+  if (conflito) {
+    throw new ErroContagemLivre(`${nomeEmpresa(conflito)} já está na contagem "${ocupadas.get(conflito)}". Encerre aquela antes de reabrir esta.`, 'EMPRESA_OCUPADA');
+  }
   const reaberta = await prisma.contagemLivre.update({
     where: { id: contagemId },
     data: { status: 'ATIVA', encerradaEm: null },
