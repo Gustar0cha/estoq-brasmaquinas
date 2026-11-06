@@ -94,6 +94,11 @@ contagemLivreRouter.post('/sessoes/:sessaoId/autorizar-fora-do-local', autentica
   res.json(await servico.autorizarForaDoLocal({ usuarioId: usuarioId(req), sessaoId: param(req, 'sessaoId'), ...dados }));
 }));
 
+contagemLivreRouter.post('/registros/:registroId/autorizar-divergencia', autenticar, exigirContador, rota(async (req, res) => {
+  const dados = z.object({ login: z.string().trim().min(1).max(80), senha: z.string().min(1).max(200) }).parse(req.body);
+  res.json(await servico.autorizarDivergenciaComSenha({ usuarioId: usuarioId(req), registroId: param(req, 'registroId'), ...dados }));
+}));
+
 contagemLivreRouter.post('/registros/:registroId/confirmar', autenticar, exigirContador, rota(async (req, res) => {
   await servico.confirmarDivergencia(usuarioId(req), param(req, 'registroId'));
   res.status(204).end();
@@ -186,6 +191,29 @@ contagemLivreRouter.post('/reaberturas/:reaberturaId/recusar', autenticar, exigi
   res.json(await servico.decidirReabertura({ reaberturaId: param(req, 'reaberturaId'), usuarioId: usuarioId(req), autorizar: false, motivo }));
 }));
 
+// ---- Autorização de divergência (chamado #571) -----------------------------
+
+contagemLivreRouter.get('/autorizacoes-divergencia', autenticar, exigirGestor, rota(async (_req, res) => {
+  res.json(await servico.listarAutorizacoesDivergencia());
+}));
+
+contagemLivreRouter.post('/autorizacoes-divergencia/:registroId/autorizar', autenticar, exigirGestor, rota(async (req, res) => {
+  const { motivo } = decisaoSchema.parse(req.body ?? {});
+  await servico.decidirDivergencia({ usuarioId: usuarioId(req), registroId: param(req, 'registroId'), autorizar: true, motivo });
+  res.status(204).end();
+}));
+
+contagemLivreRouter.post('/autorizacoes-divergencia/:registroId/recusar', autenticar, exigirGestor, rota(async (req, res) => {
+  const { motivo } = decisaoSchema.parse(req.body ?? {});
+  await servico.decidirDivergencia({ usuarioId: usuarioId(req), registroId: param(req, 'registroId'), autorizar: false, motivo });
+  res.status(204).end();
+}));
+
+contagemLivreRouter.delete('/regras-divergencia/:regraId', autenticar, exigirAdmin, rota(async (req, res) => {
+  await servico.excluirRegraDivergencia(param(req, 'regraId'), usuarioId(req));
+  res.status(204).end();
+}));
+
 contagemLivreRouter.get('/copias', autenticar, exigirAdmin, rota(async (_req, res) => {
   res.json(await servico.listarCopiasDisponiveis());
 }));
@@ -202,6 +230,7 @@ const criarSchema = z.object({
   travaLocal: z.boolean().optional(),
   travaDuplicada: z.boolean().optional(),
   incluirQuarentena: z.boolean().optional(),
+  limiteDivergencia: z.number().min(0).max(1000).nullable().optional(),
 });
 
 contagemLivreRouter.post('/', autenticar, exigirAdmin, rota(async (req, res) => {
@@ -215,7 +244,19 @@ const atualizarSchema = z.object({
   travaLocal: z.boolean().optional(),
   travaDuplicada: z.boolean().optional(),
   incluirQuarentena: z.boolean().optional(),
+  limiteDivergencia: z.number().min(0).max(1000).nullable().optional(),
 });
+
+contagemLivreRouter.get('/:id/regras-divergencia', autenticar, exigirAdmin, rota(async (req, res) => {
+  res.json(await servico.listarRegrasDivergencia(param(req, 'id')));
+}));
+
+contagemLivreRouter.post('/:id/regras-divergencia', autenticar, exigirAdmin, rota(async (req, res) => {
+  const dados = z
+    .object({ tipo: z.enum(['PRODUTO', 'LOCAL', 'RUA']), valor: z.string().trim().min(1).max(40), percentual: z.number().min(0).max(1000) })
+    .parse(req.body);
+  res.status(201).json(await servico.salvarRegraDivergencia({ contagemId: param(req, 'id'), ...dados, usuarioId: usuarioId(req) }));
+}));
 
 contagemLivreRouter.patch('/:id', autenticar, exigirAdmin, rota(async (req, res) => {
   res.json(await servico.atualizarContagemLivre(param(req, 'id'), atualizarSchema.parse(req.body), usuarioId(req)));

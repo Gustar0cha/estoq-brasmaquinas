@@ -629,6 +629,10 @@ model ContagemLivre {
   //                     no progresso e na acuracidade. Desligada (padrão),
   //                     quarentena fica de fora, como sempre foi.
   incluirQuarentena Boolean @default(false)
+  //   limiteDivergencia — % de diferença contra o disponível acima do qual a
+  //                     contagem só vale com autorização do gestor (#571).
+  //                     Nulo = desligado.
+  limiteDivergencia Float?
 
   criadaPor   Usuario   @relation("ContagemLivreCriadaPor", fields: [criadaPorId], references: [id])
   criadaPorId String
@@ -640,6 +644,7 @@ model ContagemLivre {
   registros   ContagemLivreRegistro[]
   recontagens ContagemLivreRecontagem[]
   donos       ContagemLivreItemDono[]
+  regrasDivergencia ContagemLivreRegraDivergencia[]
   quarentenas ContagemLivreQuarentena[]
   reaberturas ContagemLivreReabertura[]
 
@@ -729,11 +734,36 @@ model ContagemLivreRegistro {
   chaveUnica     String?             @unique
   // Fora do local com a trava ligada: nome do gestor que liberou com a senha.
   foraDoLocalAutorizadoPor String?
+  // Passou do limite de divergência: fica fora do relatório até o gestor
+  // decidir. Autorizado, guarda quem e quando; recusado, o registro é apagado.
+  aguardandoAutorizacao    Boolean   @default(false)
+  // Nulo com a espera ligada: não havia disponível para calcular o percentual.
+  percentualDivergencia    Float?
+  limiteAplicado           Float?
+  divergenciaAutorizadaPor String?
+  divergenciaAutorizadaEm  DateTime?
 
   @@index([contagemId, codigoProduto, localCodigo])
   @@index([sessaoId])
   @@index([contagemId, usuarioId])
+  @@index([aguardandoAutorizacao])
   @@map("contagem_livre_registros")
+}
+
+// Exceção ao limite de divergência da contagem (#571). Vale a mais específica:
+// produto, depois local, depois rua.
+model ContagemLivreRegraDivergencia {
+  id         String        @id @default(uuid())
+  contagem   ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId String
+  // PRODUTO (código), LOCAL (código) ou RUA ("RUA 12").
+  tipo       String
+  valor      String
+  percentual Float
+  criadoEm   DateTime      @default(now())
+
+  @@unique([contagemId, tipo, valor])
+  @@map("contagem_livre_regras_divergencia")
 }
 
 // Item que o gestor mandou recontar. Quem reconta não pode ser quem contou.

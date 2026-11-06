@@ -124,6 +124,7 @@ export interface ContagemLivreDTO {
   travaLocal: boolean;
   travaDuplicada: boolean;
   incluirQuarentena: boolean;
+  limiteDivergencia: number | null;
   criadaEm: string;
   encerradaEm: string | null;
 }
@@ -157,6 +158,7 @@ function montarContagem(c: LinhaContagem): ContagemLivreDTO {
     travaLocal: c.travaLocal,
     travaDuplicada: c.travaDuplicada,
     incluirQuarentena: c.incluirQuarentena,
+    limiteDivergencia: c.limiteDivergencia,
     criadaEm: c.criadaEm.toISOString(),
     encerradaEm: c.encerradaEm?.toISOString() ?? null,
   };
@@ -173,6 +175,8 @@ export interface RegistroLivreDTO {
   foraDoLocal: boolean;
   numeroContagem: number;
   registradoEm: string;
+  // Passou do limite de divergência: só vale depois que o gestor autorizar.
+  aguardandoAutorizacao: boolean;
   // Dá pra apagar enquanto o local não foi finalizado — é a correção de quem
   // digitou errado, já que a trava de duplicidade não deixa contar de novo.
   podeApagar: boolean;
@@ -192,6 +196,7 @@ function montarRegistro(r: LinhaRegistro, sessaoAberta: boolean): RegistroLivreD
     foraDoLocal: r.foraDoLocal,
     numeroContagem: r.numeroContagem,
     registradoEm: r.registradoEm.toISOString(),
+    aguardandoAutorizacao: r.aguardandoAutorizacao,
     podeApagar: sessaoAberta,
   };
 }
@@ -249,8 +254,12 @@ export interface CriarContagemLivreInput {
   travaLocal?: boolean;
   travaDuplicada?: boolean;
   incluirQuarentena?: boolean;
+  limiteDivergencia?: number | null;
   usuarioId: string;
 }
+
+// Contagem nova já nasce pedindo autorização acima de 10% (#571).
+const LIMITE_DIVERGENCIA_PADRAO = 10;
 
 export async function criarContagemLivre(input: CriarContagemLivreInput): Promise<ContagemLivreDTO> {
   const dataCopia = dataCopiaParaBanco(input.dataCopia);
@@ -287,6 +296,7 @@ export async function criarContagemLivre(input: CriarContagemLivreInput): Promis
       travaLocal: input.travaLocal ?? true,
       travaDuplicada: input.travaDuplicada ?? true,
       incluirQuarentena: input.incluirQuarentena ?? false,
+      limiteDivergencia: input.limiteDivergencia === undefined ? LIMITE_DIVERGENCIA_PADRAO : input.limiteDivergencia,
       criadaPorId: input.usuarioId,
     },
   });
@@ -469,7 +479,7 @@ const NOME_CONFIG = {
 
 export async function atualizarContagemLivre(
   contagemId: string,
-  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean; incluirQuarentena?: boolean },
+  dados: { nome?: string; fotoObrigatoria?: boolean; travaLocal?: boolean; travaDuplicada?: boolean; incluirQuarentena?: boolean; limiteDivergencia?: number | null },
   usuarioId: string
 ): Promise<ContagemLivreDTO> {
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
@@ -484,6 +494,7 @@ export async function atualizarContagemLivre(
       ...(dados.travaLocal !== undefined ? { travaLocal: dados.travaLocal } : {}),
       ...(dados.travaDuplicada !== undefined ? { travaDuplicada: dados.travaDuplicada } : {}),
       ...(dados.incluirQuarentena !== undefined ? { incluirQuarentena: dados.incluirQuarentena } : {}),
+      ...(dados.limiteDivergencia !== undefined ? { limiteDivergencia: dados.limiteDivergencia } : {}),
     },
   });
   if (dados.incluirQuarentena !== undefined && dados.incluirQuarentena !== c.incluirQuarentena) {
@@ -500,6 +511,16 @@ export async function atualizarContagemLivre(
       });
     }
   }
+  if (dados.limiteDivergencia !== undefined && dados.limiteDivergencia !== c.limiteDivergencia) {
+    void registrarLog(
+      usuarioId,
+      'CONTAGEM_CONFIGURADA',
+      dados.limiteDivergencia === null
+        ? `Desligou a autorização de divergência em "${atualizada.nome}".`
+        : `Definiu em ${dados.limiteDivergencia}% o limite de divergência de "${atualizada.nome}".`,
+      { contagemId, campo: 'limiteDivergencia', valor: dados.limiteDivergencia }
+    );
+  }
   if (nome && nome !== c.nome) {
     void registrarLog(usuarioId, 'CONTAGEM_CONFIGURADA', `Renomeou "${c.nome}" para "${nome}".`, { contagemId });
   }
@@ -510,6 +531,10 @@ export async function encerrarContagemLivre(contagemId: string, usuarioId: strin
   const c = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!c) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
   if (c.status === 'ENCERRADA') return montarContagem(c);
+  const aguardando = await prisma.contagemLivreRegistro.count({ where: { contagemId, aguardandoAutorizacao: true } });
+  if (aguardando > 0) {
+    throw new ErroContagemLivre(`${aguardando} ${aguardando === 1 ? 'contagem aguarda' : 'contagens aguardam'} autorização de divergência. Decida antes de encerrar: o que está aguardando não entra no relatório.`);
+  }
   const agora = new Date();
   // Local aberto em celular de alguém fecha junto: a contagem acabou.
   await prisma.contagemLivreSessao.updateMany({
@@ -1464,6 +1489,7 @@ export async function registrar(input: {
       : agora;
 
   const numero = sessao.numeroContagem;
+  const avaliacao = foraDoLocal ? null : await avaliarDivergencia(contagem, sessao, produto, numero, quantidade);
   const fotoChave = input.foto
     ? await uploadFotoContagem(
         `livre-${contagem.id}-${produto.codigoProduto}-${sessao.localCodigo}`,
@@ -1518,6 +1544,9 @@ export async function registrar(input: {
         fotoChave,
         chaveUnica,
         foraDoLocalAutorizadoPor: foraDoLocal ? lerLiberacao(input.liberacao, sessao.id, produto.codigoProduto) : null,
+        aguardandoAutorizacao: avaliacao?.excede ?? false,
+        percentualDivergencia: avaliacao?.excede ? avaliacao.percentual : null,
+        limiteAplicado: avaliacao?.excede ? avaliacao.limite : null,
       },
     });
   } catch (erro) {
@@ -1568,6 +1597,219 @@ async function divergeNoLocal(r: { contagemId: string; codigoProduto: string; lo
   return Math.round(((contado._sum.quantidade ?? 0) - disponivel) * 1000) !== 0;
 }
 
+// ---- Autorização de divergência (chamado #571) -----------------------------
+//
+// Acima do limite, o registro é gravado mas não entra no relatório até o
+// gestor decidir: na hora, com login e senha no celular de quem conta, ou pela
+// fila no painel. O número do sistema nunca vai para o celular.
+
+const ruaDoLocal = (nome: string) => {
+  const m = /\bRUA\s*0*(\d+)/i.exec(nome);
+  return m ? `RUA ${m[1]}` : null;
+};
+
+// O limite que vale para o item: a regra mais específica, ou o da contagem.
+async function limiteDoItem(contagem: { id: string; limiteDivergencia: number | null }, codigoProduto: string, localCodigo: string, local: string) {
+  if (contagem.limiteDivergencia === null) return null;
+  const rua = ruaDoLocal(local);
+  const regras = await prisma.contagemLivreRegraDivergencia.findMany({
+    where: {
+      contagemId: contagem.id,
+      OR: [
+        { tipo: 'PRODUTO', valor: codigoProduto },
+        { tipo: 'LOCAL', valor: localCodigo },
+        ...(rua ? [{ tipo: 'RUA', valor: rua }] : []),
+      ],
+    },
+  });
+  for (const tipo of ['PRODUTO', 'LOCAL', 'RUA']) {
+    const regra = regras.find((r) => r.tipo === tipo);
+    if (regra) return regra.percentual;
+  }
+  return contagem.limiteDivergencia;
+}
+
+// Percentual da diferença sobre o disponível. Sem disponível não há base: quem
+// achou alguma coisa ali passa do limite, e o percentual fica nulo.
+async function avaliarDivergencia(
+  contagem: { id: string; limiteDivergencia: number | null },
+  sessao: { localCodigo: string; local: string },
+  produto: { codigoProduto: string; empresaCodigo: string },
+  numero: number,
+  quantidade: number
+): Promise<{ excede: boolean; percentual: number | null; limite: number } | null> {
+  const limite = await limiteDoItem(contagem, produto.codigoProduto, sessao.localCodigo, sessao.local);
+  if (limite === null) return null;
+  const onde = { contagemId: contagem.id, codigoProduto: produto.codigoProduto, localCodigo: sessao.localCodigo, empresaCodigo: produto.empresaCodigo };
+  const [naCopia, jaContado] = await Promise.all([
+    prisma.contagemLivreEstoque.findFirst({ where: onde, select: { quantidadeTotal: true, quantidadeReservada: true } }),
+    prisma.contagemLivreRegistro.aggregate({ where: { ...onde, numeroContagem: numero }, _sum: { quantidade: true } }),
+  ]);
+  const disponivel = naCopia ? naCopia.quantidadeTotal - naCopia.quantidadeReservada : 0;
+  const contado = (jaContado._sum.quantidade ?? 0) + quantidade;
+  if (disponivel <= 0) return { excede: contado > 0, percentual: null, limite };
+  const percentual = Math.round((Math.abs(contado - disponivel) / disponivel) * 1000) / 10;
+  return { excede: percentual > limite, percentual, limite };
+}
+
+export async function autorizarDivergenciaComSenha(input: { usuarioId: string; registroId: string; login: string; senha: string }): Promise<RegistroLivreDTO> {
+  const usuario = await usuarioAtivo(input.usuarioId);
+  const registro = await prisma.contagemLivreRegistro.findUnique({ where: { id: input.registroId }, include: { sessao: { select: { finalizadaEm: true } } } });
+  if (!registro || registro.usuarioId !== usuario.id) throw new ErroContagemLivre('Registro não encontrado.', 'NAO_ENCONTRADA');
+  if (!registro.aguardandoAutorizacao) return montarRegistro(registro, registro.sessao.finalizadaEm === null);
+
+  const gestor = await prisma.usuario.findUnique({ where: { login: input.login.trim() } });
+  const valido = gestor && gestor.ativo && (await conferirHash(input.senha, gestor.senhaHash));
+  const podeAutorizar = gestor && valido && (gestor.role === 'ADMIN' || gestor.role === 'GESTOR');
+  if (!podeAutorizar) {
+    void registrarLog(usuario.id, 'DIVERGENCIA_SENHA_NEGADA', `Autorização de divergência recusada para ${registro.descricao} em ${registro.local} (login "${input.login.trim()}").`, {
+      contagemId: registro.contagemId,
+      registroId: registro.id,
+    });
+    throw new ErroContagemLivre(
+      !gestor || !valido ? 'Login ou senha do gestor não conferem.' : 'Esse login não pode autorizar: precisa ser gestor ou administrador.',
+      'LIBERACAO_RECUSADA'
+    );
+  }
+  if (gestor.id === registro.usuarioId) throw new ErroContagemLivre('Quem contou não pode autorizar a própria contagem.', 'LIBERACAO_RECUSADA');
+  const autorizado = await marcarAutorizado(registro, gestor, 'senha no celular');
+  return montarRegistro(autorizado, registro.sessao.finalizadaEm === null);
+}
+
+async function marcarAutorizado(registro: LinhaRegistro, gestor: { id: string; nome: string }, como: string, motivo?: string) {
+  const autorizado = await prisma.contagemLivreRegistro.update({
+    where: { id: registro.id },
+    data: { aguardandoAutorizacao: false, divergenciaAutorizadaPor: gestor.nome, divergenciaAutorizadaEm: new Date() },
+  });
+  esquecerRelatorio(registro.contagemId);
+  const percentual = registro.percentualDivergencia === null ? 'sem saldo no sistema' : `${registro.percentualDivergencia}%`;
+  void registrarLog(
+    gestor.id,
+    'DIVERGENCIA_AUTORIZADA',
+    `Autorizou a divergência de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade} (${percentual}), por ${como}.${motivo ? ` Motivo: ${motivo}` : ''}`,
+    { contagemId: registro.contagemId, registroId: registro.id, codigoProduto: registro.codigoProduto, localCodigo: registro.localCodigo, motivo }
+  );
+  return autorizado;
+}
+
+export interface AutorizacaoDivergenciaDTO {
+  registroId: string;
+  contagem: string;
+  codigoProduto: string;
+  descricao: string;
+  unidade: string;
+  localCodigo: string;
+  local: string;
+  numeroContagem: number;
+  quantidade: number;
+  disponivel: number;
+  percentual: number | null;
+  limite: number | null;
+  usuario: string;
+  registradoEm: string;
+  temFoto: boolean;
+}
+
+export async function listarAutorizacoesDivergencia(): Promise<AutorizacaoDivergenciaDTO[]> {
+  const registros = await prisma.contagemLivreRegistro.findMany({
+    where: { aguardandoAutorizacao: true, contagem: { status: 'ATIVA' } },
+    include: { usuario: { select: { nome: true } }, contagem: { select: { nome: true } } },
+    orderBy: { registradoEm: 'asc' },
+    take: 500,
+  });
+  const copia = await prisma.contagemLivreEstoque.findMany({
+    where: { OR: registros.map((r) => ({ contagemId: r.contagemId, codigoProduto: r.codigoProduto, localCodigo: r.localCodigo, empresaCodigo: r.empresaCodigo })) },
+    select: { contagemId: true, codigoProduto: true, localCodigo: true, empresaCodigo: true, quantidadeTotal: true, quantidadeReservada: true },
+  });
+  const chave = (r: { contagemId: string; codigoProduto: string; localCodigo: string; empresaCodigo: string }) => `${r.contagemId}|${r.codigoProduto}|${r.localCodigo}|${r.empresaCodigo}`;
+  const disponivel = new Map(copia.map((e) => [chave(e), Math.round((e.quantidadeTotal - e.quantidadeReservada) * 1000) / 1000]));
+  return registros.map((r) => ({
+    registroId: r.id,
+    contagem: r.contagem.nome,
+    codigoProduto: r.codigoProduto,
+    descricao: r.descricao,
+    unidade: r.unidade,
+    localCodigo: r.localCodigo,
+    local: r.local,
+    numeroContagem: r.numeroContagem,
+    quantidade: r.quantidade,
+    disponivel: disponivel.get(chave(r)) ?? 0,
+    percentual: r.percentualDivergencia,
+    limite: r.limiteAplicado,
+    usuario: r.usuario.nome,
+    registradoEm: r.registradoEm.toISOString(),
+    temFoto: !!r.fotoChave,
+  }));
+}
+
+export async function decidirDivergencia(input: { usuarioId: string; registroId: string; autorizar: boolean; motivo?: string }): Promise<void> {
+  const gestor = await usuarioAtivo(input.usuarioId);
+  const registro = await prisma.contagemLivreRegistro.findUnique({ where: { id: input.registroId } });
+  if (!registro || !registro.aguardandoAutorizacao) throw new ErroContagemLivre('Essa contagem não está mais aguardando autorização.', 'NAO_ENCONTRADA');
+  if (registro.usuarioId === gestor.id) throw new ErroContagemLivre('Quem contou não pode decidir a própria contagem.');
+  const motivo = input.motivo?.trim() || undefined;
+  if (input.autorizar) {
+    await marcarAutorizado(registro, gestor, 'painel', motivo);
+    return;
+  }
+  if ((motivo ?? '').length < 5) throw new ErroContagemLivre('Escreva o motivo da recusa (mínimo 5 caracteres).');
+  await removerRegistro(registro);
+  const contador = (await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa';
+  void registrarLog(gestor.id, 'DIVERGENCIA_RECUSADA', `Recusou a contagem de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}, contado por ${contador}. Motivo: ${motivo}`, {
+    contagemId: registro.contagemId,
+    registroId: registro.id,
+    codigoProduto: registro.codigoProduto,
+    localCodigo: registro.localCodigo,
+    quantidade: registro.quantidade,
+    numeroContagem: registro.numeroContagem,
+    motivo,
+  });
+}
+
+// ---- Regras do limite ------------------------------------------------------
+
+export interface RegraDivergenciaDTO {
+  id: string;
+  tipo: 'PRODUTO' | 'LOCAL' | 'RUA';
+  valor: string;
+  percentual: number;
+}
+
+export async function listarRegrasDivergencia(contagemId: string): Promise<RegraDivergenciaDTO[]> {
+  const regras = await prisma.contagemLivreRegraDivergencia.findMany({ where: { contagemId }, orderBy: [{ tipo: 'asc' }, { valor: 'asc' }] });
+  return regras.map((r) => ({ id: r.id, tipo: r.tipo as RegraDivergenciaDTO['tipo'], valor: r.valor, percentual: r.percentual }));
+}
+
+export async function salvarRegraDivergencia(input: { contagemId: string; tipo: RegraDivergenciaDTO['tipo']; valor: string; percentual: number; usuarioId: string }): Promise<RegraDivergenciaDTO> {
+  const contagem = await prisma.contagemLivre.findUnique({ where: { id: input.contagemId } });
+  if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
+  const bruto = input.valor.trim();
+  const numeroDaRua = /(\d+)/.exec(bruto)?.[1];
+  if (input.tipo === 'RUA' && !numeroDaRua) throw new ErroContagemLivre('Informe o número da rua. Ex.: 12');
+  const valor = input.tipo === 'RUA' ? `RUA ${Number(numeroDaRua)}` : bruto;
+  if (!valor) throw new ErroContagemLivre('Informe o código.');
+  const regra = await prisma.contagemLivreRegraDivergencia.upsert({
+    where: { contagemId_tipo_valor: { contagemId: input.contagemId, tipo: input.tipo, valor } },
+    update: { percentual: input.percentual },
+    create: { contagemId: input.contagemId, tipo: input.tipo, valor, percentual: input.percentual },
+  });
+  void registrarLog(input.usuarioId, 'CONTAGEM_CONFIGURADA', `Definiu em ${input.percentual}% o limite de divergência de ${input.tipo === 'RUA' ? valor : `${input.tipo === 'PRODUTO' ? 'produto' : 'local'} ${valor}`} em "${contagem.nome}".`, {
+    contagemId: input.contagemId,
+    campo: 'regraDivergencia',
+    tipo: input.tipo,
+    valor,
+    percentual: input.percentual,
+  });
+  return { id: regra.id, tipo: input.tipo, valor, percentual: regra.percentual };
+}
+
+export async function excluirRegraDivergencia(regraId: string, usuarioId: string): Promise<void> {
+  const regra = await prisma.contagemLivreRegraDivergencia.findUnique({ where: { id: regraId }, include: { contagem: { select: { nome: true } } } });
+  if (!regra) return;
+  await prisma.contagemLivreRegraDivergencia.delete({ where: { id: regraId } });
+  void registrarLog(usuarioId, 'CONTAGEM_CONFIGURADA', `Removeu o limite de divergência de ${regra.valor} em "${regra.contagem.nome}".`, { contagemId: regra.contagemId, campo: 'regraDivergencia', tipo: regra.tipo, valor: regra.valor });
+}
+
 // O contador viu o aviso de divergência e conferiu de novo: fica no log que
 // a quantidade foi confirmada.
 export async function confirmarDivergencia(usuarioId: string, registroId: string) {
@@ -1599,6 +1841,22 @@ export async function apagarRegistro(usuarioId: string, registroId: string, moti
   }
   if (!gestor) await sessaoAbertaDe(usuario, registro.sessaoId);
 
+  await removerRegistro(registro);
+  const autor = registro.usuarioId === usuario.id ? '' : ` (contado por ${(await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa'})`;
+  const justificativa = deOutro ? ` Justificativa: ${motivo!.trim()}` : '';
+  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && deOutro ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}${registro.numeroContagem === 2 ? ', 2ª contagem' : ''}.${justificativa}`, {
+    contagemId: registro.contagemId,
+    registroId: registro.id,
+    codigoProduto: registro.codigoProduto,
+    localCodigo: registro.localCodigo,
+    quantidade: registro.quantidade,
+    numeroContagem: registro.numeroContagem,
+    ...(deOutro ? { motivo: motivo!.trim() } : {}),
+  });
+}
+
+// Tira o registro e desfaz o que ele prendia: foto, dono do item e recontagem.
+async function removerRegistro(registro: LinhaRegistro) {
   await prisma.contagemLivreRegistro.delete({ where: { id: registro.id } });
   if (registro.fotoChave) await removerFotoContagem(registro.fotoChave).catch(() => undefined);
   esquecerRelatorio(registro.contagemId);
@@ -1619,17 +1877,6 @@ export async function apagarRegistro(usuarioId: string, registroId: string, moti
       .delete({ where: { chave: chaveItem(registro.contagemId, registro.codigoProduto, registro.localCodigo, registro.empresaCodigo, registro.numeroContagem) } })
       .catch(() => undefined);
   }
-  const autor = registro.usuarioId === usuario.id ? '' : ` (contado por ${(await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa'})`;
-  const justificativa = deOutro ? ` Justificativa: ${motivo!.trim()}` : '';
-  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && deOutro ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}${registro.numeroContagem === 2 ? ', 2ª contagem' : ''}.${justificativa}`, {
-    contagemId: registro.contagemId,
-    registroId: registro.id,
-    codigoProduto: registro.codigoProduto,
-    localCodigo: registro.localCodigo,
-    quantidade: registro.quantidade,
-    numeroContagem: registro.numeroContagem,
-    ...(deOutro ? { motivo: motivo!.trim() } : {}),
-  });
   if (registro.numeroContagem === 2) {
     await prisma.contagemLivreRecontagem.updateMany({
       where: {
@@ -1864,6 +2111,8 @@ export interface LinhaRelatorioLivre {
   recontagem: 'NAO' | 'PENDENTE' | 'FEITA';
   // Quem tem a recontagem pendente; nulo = qualquer colaborador.
   recontagemPara: string | null;
+  // Tem contagem acima do limite esperando o gestor: ainda não entrou aqui.
+  aguardandoAutorizacao: boolean;
   fotos: { registroId: string; numeroContagem: number }[];
   // Movido pra quarentena pelo gestor: sai das divergências e da acuracidade.
   quarentena: { usuario: string; em: string; observacao: string | null } | null;
@@ -1900,7 +2149,7 @@ const dataHoraSP = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Pau
 
 function registrosDaContagem(contagemId: string) {
   return prisma.contagemLivreRegistro.findMany({
-    where: { contagemId },
+    where: { contagemId, aguardandoAutorizacao: false },
     include: { usuario: { select: { nome: true } } },
     orderBy: { registradoEm: 'asc' },
   });
@@ -1984,7 +2233,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados] = await Promise.all([
+  const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados, esperando] = await Promise.all([
     estoqueDaCopia(contagemId),
     registrosDaContagem(contagemId),
     prisma.contagemLivreSessao.findMany({
@@ -1995,7 +2244,12 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
     prisma.contagemLivreRecontagem.findMany({ where: { contagemId }, include: { atribuidaPara: { select: { nome: true } } } }),
     prisma.contagemLivreQuarentena.findMany({ where: { contagemId }, include: { usuario: { select: { nome: true } } } }),
     codigosIgnorados(),
+    prisma.contagemLivreRegistro.findMany({
+      where: { contagemId, aguardandoAutorizacao: true },
+      select: { codigoProduto: true, localCodigo: true, empresaCodigo: true },
+    }),
   ]);
+  const aguardando = new Set(esperando.map((r) => `${r.codigoProduto}|${r.localCodigo}|${r.empresaCodigo}`));
   // Quarentena desligada: os itens dela (que só existem no retrato se a opção
   // já esteve ligada) não geram "não contado". O que foi contado lá continua.
   const estoque = estoqueTodo.filter((e) => quarentenaVisivel(contagem, e.local));
@@ -2127,6 +2381,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       custoSistema: custoUnitario === null ? null : dinheiro(quantidadeTotal * custoUnitario),
       recontagem: !rec ? 'NAO' : rec.concluidaEm ? 'FEITA' : 'PENDENTE',
       recontagemPara: rec && !rec.concluidaEm ? rec.atribuidaPara?.nome ?? null : null,
+      aguardandoAutorizacao: aguardando.has(k),
       fotos: [...item.n1, ...item.n2]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
