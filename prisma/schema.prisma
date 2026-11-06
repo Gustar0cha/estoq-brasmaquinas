@@ -789,6 +789,8 @@ model ContagemLivreRecontagem {
   atribuidaPara   Usuario?      @relation("RecontagemAtribuidaPara", fields: [atribuidaParaId], references: [id])
   atribuidaParaId String?
   concluidaEm     DateTime?
+  // Qual contagem foi pedida: 2 (recontagem) ou 3 (terceira contagem, #575).
+  numero          Int           @default(2)
 
   @@unique([contagemId, codigoProduto, localCodigo, empresaCodigo])
   @@index([contagemId, localCodigo])

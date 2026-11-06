@@ -352,7 +352,7 @@ contagemLivreRouter.post('/:id/recontagens/cancelar', autenticar, exigirGestor, 
 // Por último: "/:id/locais" não pode engolir as rotas fixas acima.
 const abrirSchema = z.object({
   codigoLocal: z.string().trim().min(1).max(30),
-  numeroContagem: z.coerce.number().int().min(1).max(2).optional(),
+  numeroContagem: z.coerce.number().int().min(1).max(3).optional(),
   finalizarAberta: z.boolean().optional(),
 });
 

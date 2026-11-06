@@ -667,8 +667,8 @@ async function montarSessao(sessao: LinhaSessao, contagem: LinhaContagem, usuari
   let progresso: SessaoLivreDTO['progresso'];
   let recontar: SessaoLivreDTO['recontar'] = null;
 
-  if (sessao.numeroContagem === 2) {
-    const itens = await recontagensDoLocalPara(contagem.id, sessao.localCodigo, usuario, true);
+  if (sessao.numeroContagem >= 2) {
+    const itens = await recontagensDoLocalPara(contagem.id, sessao.localCodigo, usuario, true, sessao.numeroContagem);
     recontar = itens.map((r) => ({
       codigoProduto: r.codigoProduto,
       descricao: r.descricao,
@@ -705,24 +705,26 @@ async function recontagensDoLocalPara(
   contagemId: string,
   localCodigo: string,
   usuario: Usuario,
-  incluirConcluidas: boolean
+  incluirConcluidas: boolean,
+  numero?: number
 ) {
   const pedidas = await prisma.contagemLivreRecontagem.findMany({
     where: {
       contagemId,
       localCodigo,
+      ...(numero ? { numero } : {}),
       ...(incluirConcluidas ? {} : { concluidaEm: null }),
       OR: [{ atribuidaParaId: null }, { atribuidaParaId: usuario.id }],
     },
     orderBy: { descricao: 'asc' },
   });
   if (pedidas.length === 0) return [];
-  const contouNaPrimeira = await prisma.contagemLivreRegistro.findMany({
-    where: { contagemId, localCodigo, numeroContagem: 1, usuarioId: usuario.id },
-    select: { codigoProduto: true, empresaCodigo: true },
+  // Quem já contou o item numa contagem anterior não recebe a seguinte.
+  const meus = await prisma.contagemLivreRegistro.findMany({
+    where: { contagemId, localCodigo, usuarioId: usuario.id },
+    select: { codigoProduto: true, empresaCodigo: true, numeroContagem: true },
   });
-  const proprios = new Set(contouNaPrimeira.map((r) => `${r.codigoProduto}|${r.empresaCodigo}`));
-  return pedidas.filter((p) => !proprios.has(`${p.codigoProduto}|${p.empresaCodigo}`));
+  return pedidas.filter((p) => !meus.some((r) => r.codigoProduto === p.codigoProduto && r.empresaCodigo === p.empresaCodigo && r.numeroContagem < p.numero));
 }
 
 export interface EstadoColaboradorDTO {
@@ -762,18 +764,22 @@ export async function estadoDoColaborador(usuarioId: string): Promise<EstadoCola
         },
       })
     : [];
-  const minhasPrimeiras = pedidas.length
+  const minhasAnteriores = pedidas.length
     ? await prisma.contagemLivreRegistro.findMany({
-        where: { contagemId: { in: ids }, numeroContagem: 1, usuarioId: usuario.id },
-        select: { contagemId: true, codigoProduto: true, localCodigo: true, empresaCodigo: true },
+        where: { contagemId: { in: ids }, usuarioId: usuario.id },
+        select: { contagemId: true, codigoProduto: true, localCodigo: true, empresaCodigo: true, numeroContagem: true },
       })
     : [];
-  const proprias = new Set(minhasPrimeiras.map((r) => `${r.contagemId}|${r.codigoProduto}|${r.localCodigo}|${r.empresaCodigo}`));
+  const primeiraMinha = new Map<string, number>();
+  for (const r of minhasAnteriores) {
+    const k = `${r.contagemId}|${r.codigoProduto}|${r.localCodigo}|${r.empresaCodigo}`;
+    primeiraMinha.set(k, Math.min(primeiraMinha.get(k) ?? r.numeroContagem, r.numeroContagem));
+  }
 
   const porLocal = new Map<string, EstadoColaboradorDTO['recontagens'][number]>();
   for (const p of pedidas) {
     if (!localVisivelPara(p.localCodigo, usuario.filial)) continue;
-    if (proprias.has(`${p.contagemId}|${p.codigoProduto}|${p.localCodigo}|${p.empresaCodigo}`)) continue;
+    if ((primeiraMinha.get(`${p.contagemId}|${p.codigoProduto}|${p.localCodigo}|${p.empresaCodigo}`) ?? p.numero) < p.numero) continue;
     const chave = `${p.contagemId}|${p.localCodigo}`;
     const atual = porLocal.get(chave) ?? { contagemId: p.contagemId, localCodigo: p.localCodigo, local: p.local, itens: 0 };
     atual.itens += 1;
@@ -831,7 +837,6 @@ export async function abrirLocal(input: {
   const usuario = await usuarioAtivo(input.usuarioId);
   const contagem = await contagemAtivaVisivel(usuario, input.contagemId);
   const codigo = input.codigoLocal.trim();
-  const numero = input.numeroContagem === 2 ? 2 : 1;
 
   if (!/^\d{1,12}$/.test(codigo)) {
     throw new ErroContagemLivre('Isso não é uma etiqueta de local. Bipe a etiqueta da prateleira.', 'NAO_E_LOCAL');
@@ -880,8 +885,13 @@ export async function abrirLocal(input: {
   if (empresa && !contagem.empresas.includes(empresa)) {
     throw new ErroContagemLivre(`${nomeLocal} é de ${nomeEmpresa(empresa)}, que não está nesta contagem.`, 'OUTRA_LOJA');
   }
-  if (numero === 2 && (await recontagensDoLocalPara(contagem.id, codigo, usuario, false)).length === 0) {
-    throw new ErroContagemLivre('Não há recontagem pedida pra você neste local.', 'SEM_RECONTAGEM');
+  // O celular só pede "recontagem": qual delas é o servidor quem sabe. Com 2ª e
+  // 3ª pendentes no mesmo local, vai primeiro a 2ª.
+  let numero = 1;
+  if ((input.numeroContagem ?? 1) >= 2) {
+    const pedidas = await recontagensDoLocalPara(contagem.id, codigo, usuario, false);
+    if (pedidas.length === 0) throw new ErroContagemLivre('Não há recontagem pedida pra você neste local.', 'SEM_RECONTAGEM');
+    numero = Math.min(...pedidas.map((p) => p.numero));
   }
 
   // Um local aberto por vez. É o "Finalizar" que fecha o local, e é por ele
@@ -945,7 +955,7 @@ export async function abrirLocal(input: {
       reaberturaId: autorizacao.id,
     });
   } else {
-    void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
+    void registrarLog(usuario.id, 'LOCAL_ABERTO', `Abriu ${nomeLocal}${numero === 3 ? ' para a 3ª contagem' : numero === 2 ? ' para recontagem' : ''} em "${contagem.nome}".`, { contagemId: contagem.id, localCodigo: codigo });
   }
   return montarSessao(sessao, contagem, usuario);
 }
@@ -1363,8 +1373,8 @@ async function conferir(
   };
 
   // --- Recontagem: só o que o gestor pediu ali.
-  if (sessao.numeroContagem === 2) {
-    const pedidas = await recontagensDoLocalPara(contagem.id, sessao.localCodigo, usuario, true);
+  if (sessao.numeroContagem >= 2) {
+    const pedidas = await recontagensDoLocalPara(contagem.id, sessao.localCodigo, usuario, true, sessao.numeroContagem);
     const daLista = candidatos.filter((c) => pedidas.some((p) => p.codigoProduto === c.codigoProduto));
     if (daLista.length === 0) {
       return {
@@ -1382,7 +1392,7 @@ async function conferir(
     if (pedido.concluidaEm) {
       return { status: 'JA_CONTADO', produto, mensagem: 'Esse produto já foi recontado.' };
     }
-    const outro = await donoDeOutro(contagem.id, produto, sessao.localCodigo, 2, usuario.id);
+    const outro = await donoDeOutro(contagem.id, produto, sessao.localCodigo, sessao.numeroContagem, usuario.id);
     if (outro) return { status: 'JA_CONTADO', produto, mensagem: outro };
     return { status: 'OK', produto, foraDoLocal: !empresaNoLocal.has(alvo.codigoProduto) };
   }
@@ -1532,7 +1542,7 @@ export async function registrar(input: {
 
   // Recontagem é sempre única por item; a 1ª, só com a trava ligada.
   const chaveUnica =
-    numero === 2 || contagem.travaDuplicada
+    numero >= 2 || contagem.travaDuplicada
       ? `${contagem.id}|${produto.codigoProduto}|${sessao.localCodigo}|${produto.empresaCodigo}|${numero}`
       : null;
 
@@ -1571,13 +1581,14 @@ export async function registrar(input: {
     throw erro;
   }
 
-  if (numero === 2) {
+  if (numero >= 2) {
     await prisma.contagemLivreRecontagem.updateMany({
       where: {
         contagemId: contagem.id,
         codigoProduto: produto.codigoProduto,
         localCodigo: sessao.localCodigo,
         empresaCodigo: produto.empresaCodigo,
+        numero,
       },
       data: { concluidaEm: agora },
     });
@@ -1586,7 +1597,7 @@ export async function registrar(input: {
   void registrarLog(
     usuario.id,
     'ITEM_REGISTRADO',
-    `${numero === 2 ? 'Recontou' : 'Contou'} ${produto.descricao} em ${sessao.local}${foraDoLocal ? ' (fora do local)' : ''}.`,
+    `${numero === 3 ? 'Fez a 3ª contagem de' : numero === 2 ? 'Recontou' : 'Contou'} ${produto.descricao} em ${sessao.local}${foraDoLocal ? ' (fora do local)' : ''}.`,
     { contagemId: contagem.id, codigoProduto: produto.codigoProduto, localCodigo: sessao.localCodigo, numeroContagem: numero }
   );
   return { ...montarRegistro(criado, true), divergente: foraDoLocal ? false : await divergeNoLocal(criado) };
@@ -1857,7 +1868,7 @@ export async function apagarRegistro(usuarioId: string, registroId: string, moti
   await removerRegistro(registro);
   const autor = registro.usuarioId === usuario.id ? '' : ` (contado por ${(await prisma.usuario.findUnique({ where: { id: registro.usuarioId }, select: { nome: true } }))?.nome ?? 'outra pessoa'})`;
   const justificativa = deOutro ? ` Justificativa: ${motivo!.trim()}` : '';
-  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && deOutro ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}${registro.numeroContagem === 2 ? ', 2ª contagem' : ''}.${justificativa}`, {
+  void registrarLog(usuario.id, 'ITEM_APAGADO', `${gestor && deOutro ? 'Excluiu' : 'Apagou'} o registro de ${registro.descricao} em ${registro.local}: ${registro.quantidade} ${registro.unidade}${autor}${registro.numeroContagem >= 2 ? `, ${registro.numeroContagem}ª contagem` : ''}.${justificativa}`, {
     contagemId: registro.contagemId,
     registroId: registro.id,
     codigoProduto: registro.codigoProduto,
@@ -1890,13 +1901,14 @@ async function removerRegistro(registro: LinhaRegistro) {
       .delete({ where: { chave: chaveItem(registro.contagemId, registro.codigoProduto, registro.localCodigo, registro.empresaCodigo, registro.numeroContagem) } })
       .catch(() => undefined);
   }
-  if (registro.numeroContagem === 2) {
+  if (registro.numeroContagem >= 2) {
     await prisma.contagemLivreRecontagem.updateMany({
       where: {
         contagemId: registro.contagemId,
         codigoProduto: registro.codigoProduto,
         localCodigo: registro.localCodigo,
         empresaCodigo: registro.empresaCodigo,
+        numero: registro.numeroContagem,
       },
       data: { concluidaEm: null },
     });
@@ -2033,7 +2045,7 @@ export async function pedirRecontagem(input: {
   itens: { codigoProduto: string; localCodigo: string; empresaCodigo: string }[];
   atribuidaParaId?: string | null;
   solicitadaPorId: string;
-}): Promise<{ pedidas: number; trocadas: number; ignoradas: string[]; avisos: string[] }> {
+}): Promise<{ pedidas: number; trocadas: number; terceiras: number; ignoradas: string[]; avisos: string[] }> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: input.contagemId } });
   if (!contagem || contagem.status !== 'ATIVA') {
     throw new ErroContagemLivre('Recontagem só pode ser pedida numa contagem ativa.');
@@ -2045,8 +2057,9 @@ export async function pedirRecontagem(input: {
   // Recontagem pendente que muda de mãos (pedido de 03/11: quem ia recontar
   // foi embora). Guarda de quem saiu, para o log e para o aviso abaixo.
   const trocadas: { de: string | null; localCodigo: string }[] = [];
+  let terceiras = 0;
   for (const item of input.itens) {
-    const [daCopia, primeiro, jaPedida] = await Promise.all([
+    const [daCopia, primeiro, jaPedida, jaContou] = await Promise.all([
       prisma.contagemLivreEstoque.findFirst({
         where: { contagemId: contagem.id, codigoProduto: item.codigoProduto, localCodigo: item.localCodigo, empresaCodigo: item.empresaCodigo },
       }),
@@ -2063,6 +2076,12 @@ export async function pedirRecontagem(input: {
           },
         },
       }),
+      input.atribuidaParaId
+        ? prisma.contagemLivreRegistro.findFirst({
+            where: { contagemId: contagem.id, codigoProduto: item.codigoProduto, localCodigo: item.localCodigo, empresaCodigo: item.empresaCodigo, usuarioId: input.atribuidaParaId },
+            select: { id: true },
+          })
+        : null,
     ]);
     const base = daCopia ?? primeiro;
     const rotulo = base ? `${base.descricao} (${base.local})` : `${item.codigoProduto} em ${item.localCodigo}`;
@@ -2070,16 +2089,19 @@ export async function pedirRecontagem(input: {
       ignoradas.push(`${rotulo}: não está na cópia nem foi contado.`);
       continue;
     }
-    if (jaPedida?.concluidaEm) {
-      ignoradas.push(`${rotulo}: já foi recontado.`);
+    // A 2ª já feita abre a 3ª (#575). Depois da 3ª, acabou.
+    if (jaPedida?.concluidaEm && jaPedida.numero >= 3) {
+      ignoradas.push(`${rotulo}: já teve a 3ª contagem.`);
       continue;
     }
-    if (input.atribuidaParaId && primeiro?.usuarioId === input.atribuidaParaId) {
-      ignoradas.push(`${rotulo}: quem reconta não pode ser quem contou.`);
+    if (jaContou) {
+      ignoradas.push(`${rotulo}: quem reconta não pode ser quem já contou.`);
       continue;
     }
+    const pedeTerceira = !!jaPedida?.concluidaEm;
+    if (pedeTerceira) terceiras += 1;
     const novoDono = input.atribuidaParaId ?? null;
-    if (jaPedida && jaPedida.atribuidaParaId !== novoDono) {
+    if (jaPedida && !pedeTerceira && jaPedida.atribuidaParaId !== novoDono) {
       trocadas.push({ de: jaPedida.atribuidaParaId, localCodigo: item.localCodigo });
     }
 
@@ -2092,7 +2114,12 @@ export async function pedirRecontagem(input: {
           empresaCodigo: item.empresaCodigo,
         },
       },
-      update: { atribuidaParaId: input.atribuidaParaId ?? null, solicitadaPorId: input.solicitadaPorId, solicitadaEm: new Date() },
+      update: {
+        atribuidaParaId: input.atribuidaParaId ?? null,
+        solicitadaPorId: input.solicitadaPorId,
+        solicitadaEm: new Date(),
+        ...(pedeTerceira ? { numero: 3, concluidaEm: null } : {}),
+      },
       create: {
         contagemId: contagem.id,
         empresaCodigo: item.empresaCodigo,
@@ -2116,7 +2143,13 @@ export async function pedirRecontagem(input: {
     );
     const nomeDe = (id: string | null) => (id ? nomes.get(id) ?? 'outra pessoa' : 'qualquer colaborador');
     const para = input.atribuidaParaId ? nomeDe(input.atribuidaParaId) : null;
-    const novas = pedidas - trocadas.length;
+    const novas = pedidas - trocadas.length - terceiras;
+    if (terceiras > 0) {
+      void registrarLog(input.solicitadaPorId, 'RECONTAGEM_PEDIDA', `Pediu a 3ª contagem de ${terceiras} ${terceiras === 1 ? 'item' : 'itens'} em "${contagem.nome}"${para ? ` para ${para}` : ''}.`, {
+        contagemId: contagem.id,
+        itens: input.itens,
+      });
+    }
     if (novas > 0) {
       void registrarLog(input.solicitadaPorId, 'RECONTAGEM_PEDIDA', `Pediu recontagem de ${novas} ${novas === 1 ? 'item' : 'itens'} em "${contagem.nome}"${para ? ` para ${para}` : ''}.`, {
         contagemId: contagem.id,
@@ -2136,7 +2169,7 @@ export async function pedirRecontagem(input: {
       const presas = await prisma.contagemLivreSessao.findMany({
         where: {
           contagemId: contagem.id,
-          numeroContagem: 2,
+          numeroContagem: { gte: 2 },
           finalizadaEm: null,
           localCodigo: { in: [...new Set(trocadas.map((t) => t.localCodigo))] },
           ...(input.atribuidaParaId ? { usuarioId: { not: input.atribuidaParaId } } : {}),
@@ -2148,7 +2181,7 @@ export async function pedirRecontagem(input: {
       }
     }
   }
-  return { pedidas, trocadas: trocadas.length, ignoradas, avisos };
+  return { pedidas, trocadas: trocadas.length, terceiras, ignoradas, avisos };
 }
 
 export async function cancelarRecontagem(input: {
@@ -2157,8 +2190,13 @@ export async function cancelarRecontagem(input: {
   localCodigo: string;
   empresaCodigo: string;
 }): Promise<void> {
+  // Cancelar a 3ª volta para a 2ª, que já estava feita.
   await prisma.contagemLivreRecontagem.deleteMany({
-    where: { ...input, concluidaEm: null },
+    where: { ...input, concluidaEm: null, numero: 2 },
+  });
+  await prisma.contagemLivreRecontagem.updateMany({
+    where: { ...input, concluidaEm: null, numero: 3 },
+    data: { numero: 2, concluidaEm: new Date() },
   });
   esquecerRelatorio(input.contagemId);
 }
@@ -2199,6 +2237,7 @@ export interface LinhaRelatorioLivre {
   quantidadeContada: number | null;
   quantidade1: number | null;
   quantidade2: number | null;
+  quantidade3: number | null;
   quantidadeTotal: number;
   quantidadeReservada: number;
   quantidadeDisponivel: number;
@@ -2210,10 +2249,15 @@ export interface LinhaRelatorioLivre {
   usuario2: string | null;
   inicio2: string | null;
   fim2: string | null;
+  usuario3: string | null;
+  inicio3: string | null;
+  fim3: string | null;
   custoUnitario: number | null;
   custoContagem: number | null;
   custoSistema: number | null;
   recontagem: 'NAO' | 'PENDENTE' | 'FEITA';
+  // Qual contagem a `recontagem` acima descreve: 2 ou 3.
+  recontagemNumero: number | null;
   // Quem tem a recontagem pendente; nulo = qualquer colaborador.
   recontagemPara: string | null;
   // Tem contagem acima do limite esperando o gestor: ainda não entrou aqui.
@@ -2384,7 +2428,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
   }
   const achadoEm = new Map<string, Set<string>>();
 
-  const porItem = new Map<string, { n1: typeof registros; n2: typeof registros }>();
+  const porItem = new Map<string, { n1: typeof registros; n2: typeof registros; n3: typeof registros }>();
   for (const r of registros) {
     const k = chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
     if (r.foraDoLocal) {
@@ -2394,8 +2438,8 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
         achadoEm.set(kCerto, (achadoEm.get(kCerto) ?? new Set<string>()).add(r.local));
       }
     }
-    const atual = porItem.get(k) ?? { n1: [], n2: [] };
-    (r.numeroContagem === 2 ? atual.n2 : atual.n1).push(r);
+    const atual = porItem.get(k) ?? { n1: [], n2: [], n3: [] };
+    (r.numeroContagem === 3 ? atual.n3 : r.numeroContagem === 2 ? atual.n2 : atual.n1).push(r);
     porItem.set(k, atual);
   }
   const recontagemDe = new Map(recontagens.map((r) => [chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo), r]));
@@ -2427,19 +2471,21 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
   for (const k of chaves) {
     const [codigoProduto, localCodigo, empresaCodigo] = k.split('|');
     const naCopia = porChave.get(k);
-    const item = porItem.get(k) ?? { n1: [], n2: [] };
-    const qualquer = item.n1[0] ?? item.n2[0];
+    const item = porItem.get(k) ?? { n1: [], n2: [], n3: [] };
+    const qualquer = item.n1[0] ?? item.n2[0] ?? item.n3[0];
     const rec = recontagemDe.get(k);
     const quar = quarentenaDe.get(k);
 
     const quantidade1 = soma(item.n1);
     const quantidade2 = soma(item.n2);
-    const quantidadeContada = quantidade2 ?? quantidade1;
+    const quantidade3 = soma(item.n3);
+    // Vale a contagem mais recente.
+    const quantidadeContada = quantidade3 ?? quantidade2 ?? quantidade1;
     const quantidadeTotal = naCopia?.quantidadeTotal ?? 0;
     const quantidadeReservada = naCopia?.quantidadeReservada ?? 0;
     const quantidadeDisponivel = Math.round((quantidadeTotal - quantidadeReservada) * 1000) / 1000;
     const custoUnitario = naCopia?.custoSemIcms ?? custoPorProduto.get(`${codigoProduto}|${empresaCodigo}`) ?? null;
-    const foraDoLocal = [...item.n1, ...item.n2].some((r) => r.foraDoLocal);
+    const foraDoLocal = [...item.n1, ...item.n2, ...item.n3].some((r) => r.foraDoLocal);
     const achados = [...(achadoEm.get(k) ?? [])].sort();
 
     linhas.push({
@@ -2456,12 +2502,13 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       foraDoLocal,
       locaisNaCopia: foraDoLocal ? [...(locaisDoProduto.get(codigoProduto) ?? [])].sort() : [],
       achadoEm: achados,
-      liberadoPor: [...new Set([...item.n1, ...item.n2].map((r) => r.foraDoLocalAutorizadoPor).filter((n): n is string => !!n))],
+      liberadoPor: [...new Set([...item.n1, ...item.n2, ...item.n3].map((r) => r.foraDoLocalAutorizadoPor).filter((n): n is string => !!n))],
       tipoDivergencia: null,
       divergenciaProduto: null,
       quantidadeContada,
       quantidade1,
       quantidade2,
+      quantidade3,
       quantidadeTotal,
       quantidadeReservada,
       quantidadeDisponivel,
@@ -2473,18 +2520,22 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       usuario2: nomes(item.n2),
       inicio2: primeiro(item.n2),
       fim2: ultimo(item.n2),
+      usuario3: nomes(item.n3),
+      inicio3: primeiro(item.n3),
+      fim3: ultimo(item.n3),
       custoUnitario,
       custoContagem: custoUnitario === null || quantidadeContada === null ? null : dinheiro(quantidadeContada * custoUnitario),
       custoSistema: custoUnitario === null ? null : dinheiro(quantidadeTotal * custoUnitario),
       recontagem: !rec ? 'NAO' : rec.concluidaEm ? 'FEITA' : 'PENDENTE',
+      recontagemNumero: rec?.numero ?? null,
       recontagemPara: rec && !rec.concluidaEm ? rec.atribuidaPara?.nome ?? null : null,
       aguardandoAutorizacao: aguardando.has(k),
-      zeradoPor: [...item.n1, ...item.n2].find((r) => r.zeradoPor)?.zeradoPor ?? null,
-      fotos: [...item.n1, ...item.n2]
+      zeradoPor: [...item.n1, ...item.n2, ...item.n3].find((r) => r.zeradoPor)?.zeradoPor ?? null,
+      fotos: [...item.n1, ...item.n2, ...item.n3]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
       quarentena: quar ? { usuario: quar.usuario.nome, em: quar.criadoEm.toISOString(), observacao: quar.observacao } : null,
-      registros: [...item.n1, ...item.n2].map((r) => ({
+      registros: [...item.n1, ...item.n2, ...item.n3].map((r) => ({
         id: r.id,
         numeroContagem: r.numeroContagem,
         usuario: r.usuario.nome,
@@ -2571,6 +2622,9 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: '2º usuário que contou', largura: 18, valor: (l) => l.usuario2 },
     { titulo: 'Início 2ª contagem', largura: 19, valor: (l) => formatoHora(l.inicio2) },
     { titulo: 'Fim 2ª contagem', largura: 19, valor: (l) => formatoHora(l.fim2) },
+    { titulo: '3º usuário que contou', largura: 18, valor: (l) => l.usuario3 },
+    { titulo: 'Início 3ª contagem', largura: 19, valor: (l) => formatoHora(l.inicio3) },
+    { titulo: 'Fim 3ª contagem', largura: 19, valor: (l) => formatoHora(l.fim3) },
     { titulo: 'Custo Unitário Médio s/ ICMS', largura: 14, valor: (l) => l.custoUnitario, numero: 'R$ #,##0.00' },
     { titulo: 'Custo Total da Contagem', largura: 15, valor: (l) => l.custoContagem, numero: 'R$ #,##0.00' },
     { titulo: 'Custo Total do Sistema', largura: 15, valor: (l) => l.custoSistema, numero: 'R$ #,##0.00' },
@@ -2584,7 +2638,8 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: 'Divergência do produto', largura: 12, valor: (l) => l.divergenciaProduto, numero: '#,##0.###;[Red]-#,##0.###' },
     { titulo: 'Qtd. 1ª contagem', largura: 11, valor: (l) => l.quantidade1, numero: '#,##0.###' },
     { titulo: 'Qtd. 2ª contagem', largura: 11, valor: (l) => l.quantidade2, numero: '#,##0.###' },
-    { titulo: 'Recontagem', largura: 11, valor: (l) => ({ NAO: '', PENDENTE: 'Pendente', FEITA: 'Feita' })[l.recontagem] },
+    { titulo: 'Qtd. 3ª contagem', largura: 11, valor: (l) => l.quantidade3, numero: '#,##0.###' },
+    { titulo: 'Recontagem', largura: 11, valor: (l) => `${l.recontagem !== 'NAO' && l.recontagemNumero === 3 ? '3ª ' : ''}${({ NAO: '', PENDENTE: 'Pendente', FEITA: 'Feita' })[l.recontagem]}` },
     { titulo: 'Quarentena', largura: 26, valor: (l) => (l.quarentena ? `${l.quarentena.usuario} · ${formatoHora(l.quarentena.em)}` : '') },
     { titulo: 'Loja', largura: 11, valor: (l) => l.empresa },
   ];
