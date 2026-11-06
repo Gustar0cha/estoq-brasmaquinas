@@ -2076,11 +2076,10 @@ export interface LinhaRelatorioLivre {
   situacao: 'CONTADO' | 'NAO_CONTADO';
   localFinalizado: boolean;
   foraDoLocal: boolean;
-  // Onde a cópia diz que o produto está, quando ele foi achado fora e não
-  // tinha local certo pra onde ir (produto que a cópia não tem em lugar nenhum).
+  // Onde a cópia diz que o produto está, quando ele foi achado fora.
   locaisNaCopia: string[];
-  // Achado fora do lugar e somado AQUI, no local da cópia (chamado de
-  // 17/10): os locais onde ele estava de verdade.
+  // Neste local da cópia: onde o produto foi achado fora do lugar. Só informa,
+  // a quantidade fica na linha de lá (chamado #573).
   achadoEm: string[];
   // Gestores que liberaram, com a senha, o registro fora do local.
   liberadoPor: string[];
@@ -2265,9 +2264,9 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
     locaisDoProduto.set(e.codigoProduto, locais);
   }
 
-  // Item achado fora do lugar soma no local onde a cópia o registra (o de
-  // maior saldo, se forem vários). Assim ele não vira sobra num local e falta
-  // no outro. Sem local na cópia (produto que ela não tem), fica onde foi achado.
+  // Item achado fora do lugar tem linha própria, no local em que foi bipado
+  // (chamado #573). O local certo (o de maior saldo na cópia) só recebe o aviso
+  // de onde ele foi achado e serve para fechar o saldo do produto, mais abaixo.
   const localCerto = new Map<string, { localCodigo: string; total: number }>();
   for (const e of estoque) {
     if (ignorados.has(e.localCodigo)) continue;
@@ -2276,23 +2275,17 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
     if (!atual || e.quantidadeTotal > atual.total) localCerto.set(k, { localCodigo: e.localCodigo, total: e.quantidadeTotal });
   }
   const achadoEm = new Map<string, Set<string>>();
-  const destinoDe = (r: (typeof registros)[number]) => {
-    if (!r.foraDoLocal) return chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
-    const certo = localCerto.get(`${r.codigoProduto}|${r.empresaCodigo}`);
-    if (!certo || certo.localCodigo === r.localCodigo) return chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
-    const k = chaveDe(r.codigoProduto, certo.localCodigo, r.empresaCodigo);
-    const onde = achadoEm.get(k) ?? new Set<string>();
-    onde.add(r.local);
-    achadoEm.set(k, onde);
-    return k;
-  };
 
   const porItem = new Map<string, { n1: typeof registros; n2: typeof registros }>();
-  // Linhas com contagem feita NELAS (não só o que veio realocado de outro local).
-  const comContagemPropria = new Set<string>();
   for (const r of registros) {
-    const k = destinoDe(r);
-    if (k === chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo)) comContagemPropria.add(k);
+    const k = chaveDe(r.codigoProduto, r.localCodigo, r.empresaCodigo);
+    if (r.foraDoLocal) {
+      const certo = localCerto.get(`${r.codigoProduto}|${r.empresaCodigo}`);
+      if (certo && certo.localCodigo !== r.localCodigo) {
+        const kCerto = chaveDe(r.codigoProduto, certo.localCodigo, r.empresaCodigo);
+        achadoEm.set(kCerto, (achadoEm.get(kCerto) ?? new Set<string>()).add(r.local));
+      }
+    }
     const atual = porItem.get(k) ?? { n1: [], n2: [] };
     (r.numeroContagem === 2 ? atual.n2 : atual.n1).push(r);
     porItem.set(k, atual);
@@ -2333,11 +2326,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
 
     const quantidade1 = soma(item.n1);
     const quantidade2 = soma(item.n2);
-    // Só o que veio de fora, num local que ainda não foi contado: espera o
-    // local ser contado (ou finalizado) pra virar contagem. Senão o achado
-    // fora viraria "falta" ali antes de alguém chegar no local.
-    const esperandoLocal = !comContagemPropria.has(k) && !locaisFinalizados.has(localCodigo);
-    const quantidadeContada = esperandoLocal ? null : quantidade2 ?? quantidade1;
+    const quantidadeContada = quantidade2 ?? quantidade1;
     const quantidadeTotal = naCopia?.quantidadeTotal ?? 0;
     const quantidadeReservada = naCopia?.quantidadeReservada ?? 0;
     const quantidadeDisponivel = Math.round((quantidadeTotal - quantidadeReservada) * 1000) / 1000;
@@ -2357,7 +2346,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       situacao: quantidadeContada === null ? 'NAO_CONTADO' : 'CONTADO',
       localFinalizado: locaisFinalizados.has(localCodigo),
       foraDoLocal,
-      locaisNaCopia: foraDoLocal && achados.length === 0 ? [...(locaisDoProduto.get(codigoProduto) ?? [])].sort() : [],
+      locaisNaCopia: foraDoLocal ? [...(locaisDoProduto.get(codigoProduto) ?? [])].sort() : [],
       achadoEm: achados,
       liberadoPor: [...new Set([...item.n1, ...item.n2].map((r) => r.foraDoLocalAutorizadoPor).filter((n): n is string => !!n))],
       tipoDivergencia: null,
@@ -2404,6 +2393,25 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
     if (l.quantidadeDivergente === null || l.quarentena) continue;
     const k = `${l.codigoProduto}|${l.empresaCodigo}`;
     somaProduto.set(k, (somaProduto.get(k) ?? 0) + l.quantidadeDivergente);
+  }
+  // O achado fora do lugar não pode virar sobra só porque o local certo não
+  // foi contado: se o local já foi finalizado, o saldo dele saiu de lá (falta,
+  // ou divergência de local se bater); se ainda vai ser contado, espera.
+  const linhaDe = new Map(linhas.map((l) => [l.chave, l]));
+  const achadoFora = new Map<string, number>();
+  for (const l of linhas) {
+    if (!l.foraDoLocal || l.quantidadeContada === null || l.quarentena) continue;
+    const k = `${l.codigoProduto}|${l.empresaCodigo}`;
+    if (localCerto.get(k)?.localCodigo !== l.localCodigo) achadoFora.set(k, (achadoFora.get(k) ?? 0) + l.quantidadeContada);
+  }
+  for (const [k, achado] of achadoFora) {
+    const certo = localCerto.get(k);
+    if (!certo) continue;
+    const [codigoProduto, empresaCodigo] = k.split('|');
+    const linhaCerta = linhaDe.get(chaveDe(codigoProduto, certo.localCodigo, empresaCodigo));
+    if (linhaCerta?.quantidadeContada != null || linhaCerta?.quarentena) continue;
+    const ajuste = locaisFinalizados.has(certo.localCodigo) ? -(linhaCerta?.quantidadeDisponivel ?? 0) : -achado;
+    somaProduto.set(k, (somaProduto.get(k) ?? 0) + ajuste);
   }
   for (const l of linhas) {
     if (l.quantidadeDivergente === null || l.quarentena) continue;
