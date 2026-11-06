@@ -20,6 +20,7 @@ import {
 } from '../sankhya/client';
 import { getCustosDaCopia, getLocalSankhya, getRetratoCopia, listarCopiasEstoque } from '../sankhya/copiaEstoque';
 import { parsearLocalizacao } from '../sankhya/localizacao';
+import { grupoDoLocal, GrupoLocal } from '../lib/gruposLocais';
 import { resolverProdutoDoBipe } from './contagem.service';
 import { criarNotificacao, notificarUsuario } from './notificacao.service';
 
@@ -2903,6 +2904,9 @@ async function montarDashboard(contagemId: string) {
   type Bloco = { total: number; contados: number; emAndamento: number; divergencias: number };
   const ruas = new Map<string, Bloco & { predios: Map<string, Bloco> }>();
   const novo = (): Bloco => ({ total: 0, contados: 0, emAndamento: 0, divergencias: 0 });
+  // Progresso por rua e área (#576): endereço novo e antigo em grupos separados.
+  type LocalDoGrupo = { localCodigo: string; local: string; total: number; contados: number };
+  const grupos = new Map<string, Bloco & GrupoLocal & { valorPendente: number; predios: Map<string, Bloco>; porLocal: Map<string, LocalDoGrupo> }>();
   // Valor e sobra/falta são do PRODUTO (a soma dos locais), contados uma vez
   // só, mesmo que ele divirja em vários locais.
   const produtosSomados = new Set<string>();
@@ -2962,6 +2966,23 @@ async function montarDashboard(contagemId: string) {
     }
     r.predios.set(predio ?? '', pb);
     ruas.set(rua ?? '', r);
+
+    const onde = grupoDoLocal(e.localCodigo, e.local);
+    const g = grupos.get(onde.id) ?? { ...onde, ...novo(), valorPendente: 0, predios: new Map<string, Bloco>(), porLocal: new Map<string, LocalDoGrupo>() };
+    const gp = g.predios.get(predio ?? '') ?? novo();
+    const gl = g.porLocal.get(e.localCodigo) ?? { localCodigo: e.localCodigo, local: e.local, total: 0, contados: 0 };
+    for (const b of [g, gp]) {
+      b.total += 1;
+      if (contado) b.contados += 1;
+      else if (locaisAbertos.has(e.localCodigo)) b.emAndamento += 1;
+      if (divergente) b.divergencias += 1;
+    }
+    gl.total += 1;
+    if (contado) gl.contados += 1;
+    else g.valorPendente += valorItem;
+    g.predios.set(predio ?? '', gp);
+    g.porLocal.set(e.localCodigo, gl);
+    grupos.set(onde.id, g);
   }
 
   // Truncado em duas casas, nunca arredondado: 2 divergências em 11 mil itens
@@ -3013,6 +3034,40 @@ async function montarDashboard(contagemId: string) {
         .sort((a, b) => numerico(a[0], b[0]))
         .map(([predio, p]) => ({ predio: predio || null, total: p.total, contados: p.contados, emAndamento: p.emAndamento, divergencias: p.divergencias })),
     }));
+
+  // No cartão aberto, os locais que faltam: os que têm mais itens primeiro. A
+  // lista é cortada para o painel continuar leve, atualizando a cada 15 s.
+  const LOCAIS_FALTANDO = 40;
+  const ordemTipo = { RUA: 0, AREA: 1, ANTIGO: 2 };
+  const progressoLocais = [...grupos.values()]
+    .sort(
+      (a, b) =>
+        ordemTipo[a.tipo] - ordemTipo[b.tipo] ||
+        (a.rua ?? Number.MAX_SAFE_INTEGER) - (b.rua ?? Number.MAX_SAFE_INTEGER) ||
+        ordemPtBr.compare(a.titulo, b.titulo)
+    )
+    .map((g) => {
+      const locaisDoGrupo = [...g.porLocal.values()];
+      const faltando = locaisDoGrupo.filter((l) => l.contados < l.total).sort((a, b) => b.total - b.contados - (a.total - a.contados) || ordemPtBr.compare(a.local, b.local));
+      return {
+        id: g.id,
+        titulo: g.titulo,
+        tipo: g.tipo,
+        rua: g.rua,
+        total: g.total,
+        contados: g.contados,
+        emAndamento: g.emAndamento,
+        divergencias: g.divergencias,
+        valorPendente: Math.round(g.valorPendente * 100) / 100,
+        locais: locaisDoGrupo.length,
+        locaisConcluidos: locaisDoGrupo.length - faltando.length,
+        predios: [...g.predios.entries()]
+          .sort((a, b) => numerico(a[0], b[0]))
+          .map(([predio, p]) => ({ predio: predio || null, total: p.total, contados: p.contados })),
+        faltando: faltando.slice(0, LOCAIS_FALTANDO),
+        faltandoOcultos: Math.max(0, faltando.length - LOCAIS_FALTANDO),
+      };
+    });
 
   const proxima = contagem.status === 'ENCERRADA' && outras[0] ? { id: outras[0].id, nome: outras[0].nome, rotuloCopia: rotuloCopia(outras[0].dataCopia) } : null;
 
@@ -3075,6 +3130,7 @@ async function montarDashboard(contagemId: string) {
       topDivergenciaFisica: topFis.sort((a, b) => b.quantidade - a.quantidade).slice(0, 8),
     },
     mapa,
+    progressoLocais,
     operadoresAtivos: new Set(sessoesAbertas.map((s) => s.usuarioId)).size,
   };
 }
