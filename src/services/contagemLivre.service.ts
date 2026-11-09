@@ -1513,7 +1513,11 @@ export async function registrar(input: {
       : agora;
 
   const numero = sessao.numeroContagem;
-  const avaliacao = foraDoLocal ? null : await avaliarDivergencia(contagem, sessao, produto, numero, quantidade);
+  // Fora do local também passa pelo limite: sem saldo aqui, qualquer quantidade
+  // pede o gestor. Só não pede de novo quem o gestor acabou de liberar com a
+  // senha, na trava de local.
+  const liberadoPeloGestor = foraDoLocal && !!lerLiberacao(input.liberacao, sessao.id, produto.codigoProduto);
+  const avaliacao = liberadoPeloGestor ? null : await avaliarDivergencia(contagem, sessao, produto, numero, quantidade);
   const fotoChave = input.foto
     ? await uploadFotoContagem(
         `livre-${contagem.id}-${produto.codigoProduto}-${sessao.localCodigo}`,
@@ -1601,7 +1605,7 @@ export async function registrar(input: {
     `${numero === 3 ? 'Fez a 3ª contagem de' : numero === 2 ? 'Recontou' : 'Contou'} ${produto.descricao} em ${sessao.local}${foraDoLocal ? ' (fora do local)' : ''}.`,
     { contagemId: contagem.id, codigoProduto: produto.codigoProduto, localCodigo: sessao.localCodigo, numeroContagem: numero }
   );
-  return { ...montarRegistro(criado, true), divergente: foraDoLocal ? false : await divergeNoLocal(criado) };
+  return { ...montarRegistro(criado, true), divergente: criado.aguardandoAutorizacao || (foraDoLocal ? false : await divergeNoLocal(criado)) };
 }
 
 // "Identificar divergência na hora": o que esta pessoa já registrou do
