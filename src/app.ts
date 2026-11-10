@@ -77,6 +77,13 @@ app.use('/painel', express.static(PASTA_PAINEL));
 // rota porque o Express 5 mudou a sintaxe de wildcard.
 app.use('/painel', (_req, res) => res.sendFile(path.join(PASTA_PAINEL, 'index.html')));
 
+// O app do celular para o navegador (iPhone, chamado #638): mesma ideia do
+// painel, em /app.
+const PASTA_APP = path.resolve(__dirname, '..', 'public', 'app');
+app.use('/app/_expo/static', express.static(path.join(PASTA_APP, '_expo', 'static'), { immutable: true, maxAge: '365d' }));
+app.use('/app', express.static(PASTA_APP));
+app.use('/app', (_req, res) => res.sendFile(path.join(PASTA_APP, 'index.html')));
+
 app.get('/health', (_req, res) => res.json({ ok: true, fluxoLivre: CAPACIDADES_FLUXO_LIVRE }));
 
 app.use('/auth', authRouter);
