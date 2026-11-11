@@ -2269,6 +2269,11 @@ export interface LinhaRelatorioLivre {
   aguardandoAutorizacao: boolean;
   // Gestor que liberou finalizar o local com este item sem contagem: entrou como 0.
   zeradoPor: string | null;
+  // O que o gestor decidiu sobre este item durante a contagem, com a
+  // justificativa que escreveu (vem dos Logs, chamado #715).
+  ocorrencias: OcorrenciaGestor[];
+  // Justificativa da divergência do PRODUTO, escrita no fim do inventário.
+  justificativa: JustificativaDivergenciaDTO | null;
   fotos: { registroId: string; numeroContagem: number }[];
   // Movido pra quarentena pelo gestor: sai das divergências e da acuracidade.
   quarentena: { usuario: string; em: string; observacao: string | null } | null;
@@ -2302,6 +2307,95 @@ const ordemPtBr = new Intl.Collator('pt-BR', { numeric: true });
 const ordemTexto = new Intl.Collator('pt-BR');
 const diaSP = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' });
 const dataHoraSP = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' });
+
+// ---- Justificativas (chamado #715) ------------------------------------------
+
+export interface OcorrenciaGestor {
+  titulo: string;
+  descricao: string;
+  por: string;
+  em: string;
+}
+
+export interface JustificativaDivergenciaDTO {
+  texto: string;
+  por: string;
+  em: string;
+}
+
+const TITULO_OCORRENCIA: Record<string, string> = {
+  ITEM_APAGADO: 'Contagem excluída',
+  DIVERGENCIA_AUTORIZADA: 'Divergência autorizada',
+  DIVERGENCIA_RECUSADA: 'Divergência recusada',
+  FORA_DO_LOCAL_AUTORIZADO: 'Fora do local liberado',
+  LOCAL_ZERADO: 'Zerado ao finalizar o local',
+};
+
+// Por produto|local. A exclusão só entra quando teve justificativa: a correção
+// que o próprio contador faz enquanto o local está aberto não é decisão do gestor.
+async function ocorrenciasDoGestor(contagemId: string): Promise<Map<string, OcorrenciaGestor[]>> {
+  const logs = await prisma.logAcao.findMany({
+    where: { acao: { in: Object.keys(TITULO_OCORRENCIA) }, detalhes: { path: ['contagemId'], equals: contagemId } },
+    orderBy: { criadoEm: 'asc' },
+  });
+  const porItem = new Map<string, OcorrenciaGestor[]>();
+  const anotar = (codigoProduto: unknown, localCodigo: unknown, o: OcorrenciaGestor) => {
+    if (typeof codigoProduto !== 'string' || typeof localCodigo !== 'string') return;
+    const k = `${codigoProduto}|${localCodigo}`;
+    porItem.set(k, [...(porItem.get(k) ?? []), o]);
+  };
+  for (const log of logs) {
+    const d = (log.detalhes ?? {}) as Record<string, unknown>;
+    if (log.acao === 'ITEM_APAGADO' && !d.motivo) continue;
+    const o = { titulo: TITULO_OCORRENCIA[log.acao], descricao: log.descricao, por: log.usuarioNome, em: log.criadoEm.toISOString() };
+    if (log.acao === 'LOCAL_ZERADO') {
+      for (const p of Array.isArray(d.produtos) ? d.produtos : []) anotar(p, d.localCodigo, o);
+    } else {
+      anotar(d.codigoProduto, d.localCodigo, o);
+    }
+  }
+  return porItem;
+}
+
+// Vale mesmo com a contagem encerrada: a justificativa é feita no fim.
+export async function salvarJustificativa(input: { contagemId: string; codigoProduto: string; empresaCodigo: string; texto: string; usuarioId: string }): Promise<JustificativaDivergenciaDTO | null> {
+  const contagem = await prisma.contagemLivre.findUnique({ where: { id: input.contagemId } });
+  if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
+  const usuario = await usuarioAtivo(input.usuarioId);
+  const texto = input.texto.trim();
+  const onde = { contagemId_codigoProduto_empresaCodigo: { contagemId: contagem.id, codigoProduto: input.codigoProduto, empresaCodigo: input.empresaCodigo } };
+  const anterior = await prisma.contagemLivreJustificativa.findUnique({ where: onde });
+  const produto =
+    (await prisma.contagemLivreEstoque.findFirst({ where: { contagemId: contagem.id, codigoProduto: input.codigoProduto }, select: { descricao: true } }))?.descricao ??
+    (await prisma.contagemLivreRegistro.findFirst({ where: { contagemId: contagem.id, codigoProduto: input.codigoProduto }, select: { descricao: true } }))?.descricao ??
+    input.codigoProduto;
+
+  if (!texto) {
+    if (!anterior) return null;
+    await prisma.contagemLivreJustificativa.delete({ where: onde });
+    esquecerRelatorio(contagem.id);
+    void registrarLog(usuario.id, 'DIVERGENCIA_JUSTIFICADA', `Apagou a justificativa de ${produto} em "${contagem.nome}". Era: ${anterior.texto}`, {
+      contagemId: contagem.id,
+      codigoProduto: input.codigoProduto,
+      anterior: anterior.texto,
+    });
+    return null;
+  }
+  if (texto.length < 5) throw new ErroContagemLivre('Escreva a justificativa (mínimo 5 caracteres).');
+  const salva = await prisma.contagemLivreJustificativa.upsert({
+    where: onde,
+    update: { texto, usuarioNome: usuario.nome, usuarioId: usuario.id, atualizadaEm: new Date() },
+    create: { contagemId: contagem.id, codigoProduto: input.codigoProduto, empresaCodigo: input.empresaCodigo, texto, usuarioNome: usuario.nome, usuarioId: usuario.id },
+  });
+  esquecerRelatorio(contagem.id);
+  void registrarLog(
+    usuario.id,
+    'DIVERGENCIA_JUSTIFICADA',
+    `${anterior ? 'Trocou a justificativa' : 'Justificou a divergência'} de ${produto} em "${contagem.nome}": ${texto}${anterior ? ` (antes: ${anterior.texto})` : ''}`,
+    { contagemId: contagem.id, codigoProduto: input.codigoProduto, texto, ...(anterior ? { anterior: anterior.texto } : {}) }
+  );
+  return { texto: salva.texto, por: salva.usuarioNome, em: salva.atualizadaEm.toISOString() };
+}
 
 function registrosDaContagem(contagemId: string) {
   return prisma.contagemLivreRegistro.findMany({
@@ -2389,7 +2483,7 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
   const contagem = await prisma.contagemLivre.findUnique({ where: { id: contagemId } });
   if (!contagem) throw new ErroContagemLivre('Contagem não encontrada.', 'NAO_ENCONTRADA');
 
-  const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados, esperando] = await Promise.all([
+  const [estoqueTodo, registros, finalizadas, recontagens, quarentenas, ignorados, esperando, ocorrencias, justificativas] = await Promise.all([
     estoqueDaCopia(contagemId),
     registrosDaContagem(contagemId),
     prisma.contagemLivreSessao.findMany({
@@ -2404,7 +2498,12 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       where: { contagemId, aguardandoAutorizacao: true },
       select: { codigoProduto: true, localCodigo: true, empresaCodigo: true },
     }),
+    ocorrenciasDoGestor(contagemId),
+    prisma.contagemLivreJustificativa.findMany({ where: { contagemId } }),
   ]);
+  const justificativaDe = new Map(
+    justificativas.map((j) => [`${j.codigoProduto}|${j.empresaCodigo}`, { texto: j.texto, por: j.usuarioNome, em: j.atualizadaEm.toISOString() }])
+  );
   const aguardando = new Set(esperando.map((r) => `${r.codigoProduto}|${r.localCodigo}|${r.empresaCodigo}`));
   // Quarentena desligada: os itens dela (que só existem no retrato se a opção
   // já esteve ligada) não geram "não contado". O que foi contado lá continua.
@@ -2536,6 +2635,8 @@ async function montarRelatorio(contagemId: string): Promise<Relatorio> {
       recontagemPara: rec && !rec.concluidaEm ? rec.atribuidaPara?.nome ?? null : null,
       aguardandoAutorizacao: aguardando.has(k),
       zeradoPor: [...item.n1, ...item.n2, ...item.n3].find((r) => r.zeradoPor)?.zeradoPor ?? null,
+      ocorrencias: ocorrencias.get(`${codigoProduto}|${localCodigo}`) ?? [],
+      justificativa: justificativaDe.get(`${codigoProduto}|${empresaCodigo}`) ?? null,
       fotos: [...item.n1, ...item.n2, ...item.n3]
         .filter((r) => r.fotoChave)
         .map((r) => ({ registroId: r.id, numeroContagem: r.numeroContagem })),
@@ -2639,6 +2740,8 @@ export async function gerarRelatorioXlsx(contagemId: string): Promise<{ buffer: 
     { titulo: 'Achado em', largura: 32, valor: (l) => l.achadoEm.join(' · ') },
     { titulo: 'Fora do local liberado por', largura: 22, valor: (l) => l.liberadoPor.join(', ') },
     { titulo: 'Zerado ao finalizar, liberado por', largura: 22, valor: (l) => l.zeradoPor ?? '' },
+    { titulo: 'Justificativa da divergência', largura: 40, valor: (l) => (l.justificativa ? `${l.justificativa.texto} (${l.justificativa.por})` : '') },
+    { titulo: 'Decisões do gestor', largura: 50, valor: (l) => l.ocorrencias.map((o) => `${o.titulo}: ${o.descricao}`).join(' | ') },
     { titulo: 'Tipo de divergência', largura: 14, valor: (l) => (l.tipoDivergencia === 'ESTOQUE' ? 'Estoque' : l.tipoDivergencia === 'LOCAL' ? 'Local' : '') },
     { titulo: 'Divergência do produto', largura: 12, valor: (l) => l.divergenciaProduto, numero: '#,##0.###;[Red]-#,##0.###' },
     { titulo: 'Qtd. 1ª contagem', largura: 11, valor: (l) => l.quantidade1, numero: '#,##0.###' },

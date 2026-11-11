@@ -254,6 +254,13 @@ const atualizarSchema = z.object({
   travaFinalizar: z.boolean().optional(),
 });
 
+contagemLivreRouter.put('/:id/justificativas', autenticar, exigirGestor, rota(async (req, res) => {
+  const dados = z
+    .object({ codigoProduto: z.string().trim().min(1).max(20), empresaCodigo: z.string().trim().min(1).max(10), texto: z.string().max(1000) })
+    .parse(req.body);
+  res.json({ justificativa: await servico.salvarJustificativa({ contagemId: param(req, 'id'), ...dados, usuarioId: usuarioId(req) }) });
+}));
+
 contagemLivreRouter.get('/:id/regras-divergencia', autenticar, exigirAdmin, rota(async (req, res) => {
   res.json(await servico.listarRegrasDivergencia(param(req, 'id')));
 }));

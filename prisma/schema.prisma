@@ -648,6 +648,7 @@ model ContagemLivre {
   recontagens ContagemLivreRecontagem[]
   donos       ContagemLivreItemDono[]
   regrasDivergencia ContagemLivreRegraDivergencia[]
+  justificativas    ContagemLivreJustificativa[]
   quarentenas ContagemLivreQuarentena[]
   reaberturas ContagemLivreReabertura[]
 
@@ -753,6 +754,24 @@ model ContagemLivreRegistro {
   @@index([contagemId, usuarioId])
   @@index([aguardandoAutorizacao])
   @@map("contagem_livre_registros")
+}
+
+// Justificativa da divergência de um produto, escrita no fim do inventário
+// (chamado #715): entrada ou saída lançada errado, apontamento pendente etc.
+// Uma por produto e empresa na contagem; trocar o texto substitui e vai pros Logs.
+model ContagemLivreJustificativa {
+  id            String        @id @default(uuid())
+  contagem      ContagemLivre @relation(fields: [contagemId], references: [id], onDelete: Cascade)
+  contagemId    String
+  empresaCodigo String
+  codigoProduto String
+  texto         String
+  usuarioNome   String
+  usuarioId     String?
+  atualizadaEm  DateTime      @default(now())
+
+  @@unique([contagemId, codigoProduto, empresaCodigo])
+  @@map("contagem_livre_justificativas")
 }
 
 // Exceção ao limite de divergência da contagem (#571). Vale a mais específica:
